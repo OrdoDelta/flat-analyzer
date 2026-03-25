@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flat Analyzer (MVP)</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="container header-row">
+        <div>
+          <h1>Flat Analyzer</h1>
+          <p class="muted">Traffic-light scoring for flat offers (local MVP).</p>
+        </div>
+        <div class="header-actions">
+          <button id="btnExport" class="btn secondary" type="button">Export JSON</button>
+          <button id="btnReset" class="btn danger" type="button" title="Clears local data">Reset</button>
+        </div>
+      </div>
+      <div class="container tabs" role="tablist" aria-label="Sections">
+        <button class="tab active" id="tabOffers" type="button" role="tab" aria-selected="true">Offers</button>
+        <button class="tab" id="tabImport" type="button" role="tab" aria-selected="false">Import</button>
+        <button class="tab" id="tabSettings" type="button" role="tab" aria-selected="false">Settings</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <section id="viewOffers" class="view">
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <label class="field compact">
+              <span class="label">Search</span>
+              <input id="searchInput" type="search" placeholder="Title, URL…" />
+            </label>
+            <label class="field compact">
+              <span class="label">Sort</span>
+              <select id="sortSelect">
+                <option value="score">Score</option>
+                <option value="yield_desc">Yield (desc)</option>
+                <option value="ppsqm_asc">€/m² (asc)</option>
+                <option value="created_desc">Newest</option>
+              </select>
+            </label>
+          </div>
+          <div class="toolbar-right">
+            <button id="btnAddOffer" class="btn" type="button">Add offer</button>
+          </div>
+        </div>
+
+        <div id="offersEmpty" class="empty hidden">
+          <h2>No offers yet</h2>
+          <p class="muted">Add one manually, or paste a results page HTML in Import.</p>
+        </div>
+
+        <div id="offersGrid" class="grid"></div>
+      </section>
+
+      <section id="viewImport" class="view hidden">
+        <div class="panel">
+          <h2>Import</h2>
+          <p class="muted">
+            MVP approach: paste the HTML source of your ImmoScout search results page (or paste JSON exported from this app).
+            Direct URL scanning often runs into logins/CORS; we can automate that later.
+          </p>
+          <div class="row">
+            <label class="field" style="flex: 1">
+              <span class="label">Or choose a saved HTML file</span>
+              <input id="importFile" type="file" accept=".html,.htm,.txt" />
+            </label>
+          </div>
+          <label class="field">
+            <span class="label">Paste HTML or JSON</span>
+            <textarea id="importTextarea" rows="10" placeholder="Paste HTML source (Ctrl/Cmd+U → copy) or JSON array of offers…"></textarea>
+          </label>
+          <div class="row">
+            <button id="btnParseImport" class="btn" type="button">Parse</button>
+            <button id="btnAddParsed" class="btn secondary" type="button" disabled>Add parsed offers</button>
+          </div>
+        </div>
+
+        <div id="importResults" class="panel hidden">
+          <div class="row space-between">
+            <h3>Parsed offers</h3>
+            <span id="importCount" class="pill">0</span>
+          </div>
+          <div id="importHint" class="muted small"></div>
+          <div id="importGrid" class="grid"></div>
+        </div>
+      </section>
+
+      <section id="viewSettings" class="view hidden">
+        <div class="panel">
+          <h2>Settings</h2>
+          <p class="muted">Adjust thresholds for green/yellow. Red is everything outside yellow. “Gray” means missing data.</p>
+
+          <div class="settings-grid">
+            <div class="settings-card">
+              <h3>Assumptions</h3>
+              <label class="field">
+                <span class="label">Purchase costs (%)</span>
+                <input id="purchaseCostsPct" type="number" min="0" step="0.1" />
+              </label>
+              <label class="field">
+                <span class="label">Target gross yield (for “Price @ …”)</span>
+                <input id="targetYield" type="number" min="0" step="0.001" />
+              </label>
+              <p class="muted small">Applied to price to approximate total acquisition cost.</p>
+            </div>
+
+            <div class="settings-card">
+              <h3>Green</h3>
+              <label class="field">
+                <span class="label">Max €/m²</span>
+                <input id="greenMaxPricePerSqm" type="number" min="0" step="1" />
+              </label>
+              <label class="field">
+                <span class="label">Min gross yield</span>
+                <input id="greenMinYield" type="number" min="0" step="0.001" />
+              </label>
+              <label class="field">
+                <span class="label">Max rent multiplier</span>
+                <input id="greenMaxMultiplier" type="number" min="0" step="0.1" />
+              </label>
+            </div>
+
+            <div class="settings-card">
+              <h3>Yellow</h3>
+              <label class="field">
+                <span class="label">Max €/m²</span>
+                <input id="yellowMaxPricePerSqm" type="number" min="0" step="1" />
+              </label>
+              <label class="field">
+                <span class="label">Min gross yield</span>
+                <input id="yellowMinYield" type="number" min="0" step="0.001" />
+              </label>
+              <label class="field">
+                <span class="label">Max rent multiplier</span>
+                <input id="yellowMaxMultiplier" type="number" min="0" step="0.1" />
+              </label>
+            </div>
+          </div>
+
+          <div class="row">
+            <button id="btnSaveSettings" class="btn" type="button">Save settings</button>
+            <span id="settingsSaved" class="muted hidden">Saved.</span>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="offerDialog" class="dialog">
+      <form id="offerForm" method="dialog" class="dialog-inner">
+        <div class="row space-between">
+          <h2 id="dialogTitle">Add offer</h2>
+          <button class="icon-btn" value="cancel" aria-label="Close" type="submit">✕</button>
+        </div>
+
+        <div class="two-col">
+          <label class="field">
+            <span class="label">Title</span>
+            <input id="offerTitle" required />
+          </label>
+          <label class="field">
+            <span class="label">URL</span>
+            <input id="offerUrl" placeholder="https://…" />
+          </label>
+          <label class="field">
+            <span class="label">Price (€)</span>
+            <input id="offerPrice" type="number" min="0" step="1" required />
+          </label>
+          <label class="field">
+            <span class="label">Living area (m²)</span>
+            <input id="offerSqm" type="number" min="0" step="0.1" required />
+          </label>
+          <label class="field">
+            <span class="label">Monthly rent (€)</span>
+            <input id="offerMonthlyRent" type="number" min="0" step="1" />
+          </label>
+          <label class="field">
+            <span class="label">Utility costs / Nebenkosten (€ / month)</span>
+            <input id="offerMonthlyUtilities" type="number" min="0" step="1" />
+          </label>
+          <label class="field">
+            <span class="label">Reserve / Rücklagen (€ / month)</span>
+            <input id="offerMonthlyReserve" type="number" min="0" step="1" />
+          </label>
+          <div class="field">
+            <span class="label">Notes</span>
+            <textarea id="offerNotes" rows="3" placeholder="Optional"></textarea>
+          </div>
+        </div>
+
+        <menu class="row dialog-actions">
+          <button class="btn secondary" value="cancel" type="submit">Cancel</button>
+          <button id="btnSaveOffer" class="btn" value="default" type="submit">Save</button>
+        </menu>
+        <input id="offerId" type="hidden" />
+      </form>
+    </dialog>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>
