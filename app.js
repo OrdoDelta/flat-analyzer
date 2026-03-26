@@ -3,6 +3,12 @@ const STORAGE_KEYS = {
   settings: "flat_analyzer_settings_v1",
 };
 
+const THEME_STORAGE_KEY = "flat_analyzer_theme_v1";
+const THEME_DEFAULT = "light";
+
+const LOCALE = "de-DE";
+const FETCH_ENDPOINT = "/api/fetch";
+
 const DEFAULT_SETTINGS = {
   purchaseCostsPct: 10.0,
   targetYield: 0.05,
@@ -13,6 +19,60 @@ const DEFAULT_SETTINGS = {
 /** @typedef {{id:string,title:string,url?:string,price:number,sqm:number,monthlyRent?:number,monthlyUtilities?:number,monthlyReserve?:number,description?:string,notes?:string,source?:string,createdAt:number}} Offer */
 
 const $ = (id) => document.getElementById(id);
+
+function readThemeSetting() {
+  try {
+    const raw = localStorage.getItem(THEME_STORAGE_KEY);
+    if (raw === "light" || raw === "dark" || raw === "system") return raw;
+    return THEME_DEFAULT;
+  } catch {
+    return THEME_DEFAULT;
+  }
+}
+
+function writeThemeSetting(setting) {
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, setting);
+  } catch {
+    // ignore (e.g., localStorage blocked)
+  }
+}
+
+function resolveTheme(setting, prefersDark) {
+  if (setting === "system") return prefersDark ? "dark" : "light";
+  return setting === "dark" ? "dark" : "light";
+}
+
+function applyTheme(setting, prefersDark) {
+  const theme = resolveTheme(setting, prefersDark);
+  document.documentElement.dataset.themeSetting = setting;
+  document.documentElement.dataset.theme = theme;
+}
+
+function initThemeControls() {
+  const select = $("themeSelect");
+  if (!select) return;
+
+  const media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+  let setting = readThemeSetting();
+  select.value = setting;
+  applyTheme(setting, media?.matches ?? false);
+
+  select.addEventListener("change", () => {
+    setting = select.value === "dark" || select.value === "system" ? select.value : "light";
+    writeThemeSetting(setting);
+    applyTheme(setting, media?.matches ?? false);
+  });
+
+  if (!media) return;
+  const onMediaChange = () => {
+    if (setting !== "system") return;
+    applyTheme(setting, media.matches);
+  };
+
+  if (typeof media.addEventListener === "function") media.addEventListener("change", onMediaChange);
+  else if (typeof media.addListener === "function") media.addListener(onMediaChange);
+}
 
 function loadJson(key, fallback) {
   try {
@@ -34,17 +94,34 @@ function uid() {
 
 function formatEuro(value) {
   if (!Number.isFinite(value)) return "—";
-  return new Intl.NumberFormat(undefined, { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(value);
+  return new Intl.NumberFormat(LOCALE, {
+    style: "currency",
+    currency: "EUR",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
 }
 
 function formatNumber(value, digits = 2) {
   if (!Number.isFinite(value)) return "—";
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(value);
+  return new Intl.NumberFormat(LOCALE, { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value);
 }
 
 function formatPercent(value, digits = 2) {
   if (!Number.isFinite(value)) return "—";
-  return new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: digits }).format(value);
+  return new Intl.NumberFormat(LOCALE, {
+    style: "percent",
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(value);
+}
+
+function toHostLabel(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
 }
 
 function clampNonNegative(n) {
@@ -73,13 +150,13 @@ function evaluateOffer(offer, settings) {
 
   const missing = [];
   if (!Number.isFinite(pricePerSqm)) missing.push("€/m²");
-  if (!Number.isFinite(grossYield)) missing.push("rent / yield");
-  if (!Number.isFinite(rentMultiplier)) missing.push("rent multiplier");
+  if (!Number.isFinite(grossYield)) missing.push("Miete/Rendite");
+  if (!Number.isFinite(rentMultiplier)) missing.push("Kaufpreisfaktor");
   if (missing.length > 0) {
     return {
       color: "gray",
-      label: "Incomplete",
-      reasons: [`Missing: ${missing.join(", ")}`],
+      label: "Unvollständig",
+      reasons: [`Fehlt: ${missing.join(", ")}`],
       metrics: { pricePerSqm, grossYield, rentMultiplier },
     };
   }
@@ -94,20 +171,20 @@ function evaluateOffer(offer, settings) {
     rentMultiplier <= settings.yellow.maxMultiplier;
 
   if (isGreen) {
-    reasons.push("Meets all green thresholds.");
-    return { color: "green", label: "Call immediately", reasons, metrics: { pricePerSqm, grossYield, rentMultiplier } };
+    reasons.push("Erfüllt alle grünen Grenzwerte.");
+    return { color: "green", label: "Sofort anrufen", reasons, metrics: { pricePerSqm, grossYield, rentMultiplier } };
   }
   if (isYellow) {
-    if (pricePerSqm > settings.green.maxPricePerSqm) reasons.push("€/m² is above green.");
-    if (grossYield < settings.green.minYield) reasons.push("Yield is below green.");
-    if (rentMultiplier > settings.green.maxMultiplier) reasons.push("Multiplier is above green.");
-    return { color: "yellow", label: "Take a look", reasons, metrics: { pricePerSqm, grossYield, rentMultiplier } };
+    if (pricePerSqm > settings.green.maxPricePerSqm) reasons.push("€/m² liegt über Grün.");
+    if (grossYield < settings.green.minYield) reasons.push("Rendite liegt unter Grün.");
+    if (rentMultiplier > settings.green.maxMultiplier) reasons.push("Kaufpreisfaktor liegt über Grün.");
+    return { color: "yellow", label: "Anschauen", reasons, metrics: { pricePerSqm, grossYield, rentMultiplier } };
   }
 
-  if (pricePerSqm > settings.yellow.maxPricePerSqm) reasons.push("€/m² too high.");
-  if (grossYield < settings.yellow.minYield) reasons.push("Yield too low.");
-  if (rentMultiplier > settings.yellow.maxMultiplier) reasons.push("Multiplier too high.");
-  return { color: "red", label: "No go", reasons, metrics: { pricePerSqm, grossYield, rentMultiplier } };
+  if (pricePerSqm > settings.yellow.maxPricePerSqm) reasons.push("€/m² zu hoch.");
+  if (grossYield < settings.yellow.minYield) reasons.push("Rendite zu niedrig.");
+  if (rentMultiplier > settings.yellow.maxMultiplier) reasons.push("Kaufpreisfaktor zu hoch.");
+  return { color: "red", label: "Nein", reasons, metrics: { pricePerSqm, grossYield, rentMultiplier } };
 }
 
 function scoreRank(color) {
@@ -121,75 +198,91 @@ function renderCard(offer, settings, { compact = false } = {}) {
   const evalResult = evaluateOffer(offer, settings);
   const { pricePerSqm, grossYield, rentMultiplier, annualRent, priceForTargetYield } = computeMetrics(offer, settings);
   const dotClass = evalResult.color;
+  const missingFields = [];
+  if (!Number.isFinite(offer.price)) missingFields.push("Kaufpreis");
+  if (!Number.isFinite(offer.sqm)) missingFields.push("Wohnfläche");
+  if (!Number.isFinite(offer.monthlyRent)) missingFields.push("Miete");
+  const missingHtml = compact && missingFields.length ? `<div class="card-meta">Fehlende Angaben: ${escapeHtml(missingFields.join(", "))}</div>` : "";
 
   const urlHtml = offer.url
-    ? `<a href="${escapeHtmlAttr(offer.url)}" target="_blank" rel="noreferrer">Open</a>`
-    : `<span class="muted small">No URL</span>`;
+    ? `<a href="${escapeHtmlAttr(offer.url)}" target="_blank" rel="noreferrer">Öffnen</a>`
+    : `<span class="muted small">Keine URL</span>`;
 
   const notesHtml = offer.notes ? `<div class="reasons">${escapeHtml(offer.notes)}</div>` : "";
   const descriptionText = normalizeWhitespace(offer.description || "");
   const descriptionHtml = descriptionText
     ? `<div class="reasons">${escapeHtml(descriptionText.length > 260 ? descriptionText.slice(0, 260) + "…" : descriptionText)}</div>`
     : "";
-  const sourceHtml = offer.source ? `<span class="muted small">Source: ${escapeHtml(offer.source)}</span>` : "";
-
   const reasons = evalResult.reasons.length ? evalResult.reasons.join(" ") : "";
-  const reasonsHtml = reasons ? `<div class="reasons">${escapeHtml(reasons)}</div>` : "";
+  const reasonsHtml = reasons ? `<div class="card-meta">${escapeHtml(reasons)}</div>` : "";
+  const sourceTagHtml = offer.source ? `<span class="meta-pill">${escapeHtml(offer.source)}</span>` : "";
+  const hostTagHtml = offer.url ? `<span class="meta-pill">${escapeHtml(toHostLabel(offer.url))}</span>` : "";
 
-  const actionsHtml = compact
+  const editButtonHtml = compact
     ? ""
-    : `<div class="card-actions">
-        <button class="btn secondary" type="button" data-action="edit" data-id="${offer.id}">Edit</button>
-        <button class="btn danger" type="button" data-action="delete" data-id="${offer.id}">Delete</button>
-      </div>`;
+    : `<button class="icon-btn icon-btn--small" type="button" data-action="edit" data-id="${offer.id}" aria-label="Bearbeiten" title="Bearbeiten">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 20h9" />
+          <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+        </svg>
+      </button>`;
 
   return `
     <article class="card" data-id="${offer.id}">
       <div class="card-head">
-        <div>
-          <h3>${escapeHtml(offer.title || "Untitled")}</h3>
-          <div class="row">
+        <div class="card-head-main">
+          <h3>${escapeHtml(offer.title || "Ohne Titel")}</h3>
+          <div class="row card-links">
             ${urlHtml}
-            ${sourceHtml}
           </div>
         </div>
-        <div class="badge" title="${escapeHtmlAttr(evalResult.label)}">
-          <span class="dot ${dotClass}"></span>
-          <span>${escapeHtml(evalResult.label)}</span>
+        <div class="card-head-right">
+          ${editButtonHtml}
+          <div class="badge badge--${dotClass}" title="${escapeHtmlAttr(evalResult.label)}">
+            <span class="dot ${dotClass}"></span>
+            <span>${escapeHtml(evalResult.label)}</span>
+          </div>
         </div>
       </div>
-      <div class="kv">
-        <div>
-          <div class="k">Price</div>
-          <div class="v">${formatEuro(offer.price)}</div>
+      <div class="card-hero">
+        <div class="hero-metric hero-metric--price">
+          <div class="k">Kaufpreis</div>
+          <div class="hero-value">${formatEuro(offer.price)}</div>
         </div>
-        <div>
-          <div class="k">Area</div>
-          <div class="v">${formatNumber(offer.sqm, 1)} m²</div>
+        <div class="hero-metric">
+          <div class="k">Bruttorendite</div>
+          <div class="hero-value">${formatPercent(grossYield)}</div>
         </div>
-        <div>
+        <div class="hero-metric">
           <div class="k">€/m²</div>
-          <div class="v">${formatEuro(pricePerSqm)}</div>
+          <div class="hero-value">${formatEuro(pricePerSqm)}</div>
+        </div>
+      </div>
+      <div class="card-meta-row">
+        ${hostTagHtml}
+        ${sourceTagHtml}
+      </div>
+      ${missingHtml}
+      <div class="kv card-kv">
+        <div>
+          <div class="k">Wohnfläche</div>
+          <div class="v">${formatNumber(offer.sqm, 2)} m²</div>
         </div>
         <div>
-          <div class="k">Monthly rent</div>
+          <div class="k">Monatsmiete</div>
           <div class="v">${formatEuro(offer.monthlyRent)}</div>
         </div>
         <div>
-          <div class="k">Annual rent</div>
+          <div class="k">Jahresmiete</div>
           <div class="v">${formatEuro(annualRent)}</div>
         </div>
         <div>
-          <div class="k">Price @ ${formatPercent(settings.targetYield, 0)}</div>
+          <div class="k">Maximaler Kaufpreis bei ${formatPercent(settings.targetYield, 0)} Rendite</div>
           <div class="v">${formatEuro(priceForTargetYield)}</div>
         </div>
         <div>
-          <div class="k">Gross yield</div>
-          <div class="v">${formatPercent(grossYield)}</div>
-        </div>
-        <div>
-          <div class="k">Rent multiplier</div>
-          <div class="v">${formatNumber(rentMultiplier, 1)}×</div>
+          <div class="k">Kaufpreisfaktor</div>
+          <div class="v">${formatNumber(rentMultiplier, 2)}×</div>
         </div>
         <div>
           <div class="k">Nebenkosten</div>
@@ -203,7 +296,6 @@ function renderCard(offer, settings, { compact = false } = {}) {
       ${reasonsHtml}
       ${descriptionHtml}
       ${notesHtml}
-      ${actionsHtml}
     </article>
   `;
 }
@@ -314,7 +406,7 @@ function parseOffersFromJson(text) {
   return offers
     .map((o) => ({
       id: uid(),
-      title: String(o.title || o.name || "Imported offer"),
+      title: String(o.title || o.name || "Importiertes Angebot"),
       url: o.url ? String(o.url) : undefined,
       price: Number(o.price),
       sqm: Number(o.sqm || o.area || o.livingArea),
@@ -341,7 +433,7 @@ function parseOffersFromHtml(htmlText) {
     const title =
       normalizeWhitespace(doc.querySelector('meta[property="og:title"]')?.getAttribute("content") || "") ||
       normalizeWhitespace(doc.title || "") ||
-      "ImmoScout expose";
+      "ImmoScout Exposé";
 
     const descriptionParts = [];
     const objDesc = normalizeWhitespace(doc.querySelector(".is24qa-objektbeschreibung")?.textContent || "");
@@ -426,12 +518,13 @@ function parseOffersFromHtml(htmlText) {
             if (!url) continue;
             jsonLdOffers.push({
               id: uid(),
-              title: normalizeWhitespace(title || "Offer"),
+              title: normalizeWhitespace(title || "Angebot"),
               url,
               price: 0,
               sqm: 0,
               monthlyRent: undefined,
-              notes: "Imported from JSON-LD (missing price/area in source HTML). Open listing and add numbers manually, or paste full rendered DOM.",
+              notes:
+                "Aus JSON-LD importiert (Preis/Wohnfläche fehlen im HTML-Quelltext). Öffne das Exposé und ergänze die Zahlen manuell oder füge den vollständig gerenderten DOM ein.",
               source: "jsonld",
               createdAt: Date.now(),
             });
@@ -510,7 +603,7 @@ function parseOffersFromHtml(htmlText) {
     const title =
       normalizeWhitespace(a.getAttribute("aria-label") || "") ||
       normalizeWhitespace(a.textContent || "") ||
-      "ImmoScout offer";
+      "ImmoScout Angebot";
 
     if (!Number.isFinite(price) || !Number.isFinite(sqm)) continue;
 
@@ -549,12 +642,15 @@ function parseImportText(text) {
 }
 
   function init() {
+    initThemeControls();
+
   /** @type {Offer[]} */
   let offers = loadJson(STORAGE_KEYS.offers, []);
   let settings = { ...DEFAULT_SETTINGS, ...loadJson(STORAGE_KEYS.settings, {}) };
   settings.green = { ...DEFAULT_SETTINGS.green, ...(settings.green || {}) };
   settings.yellow = { ...DEFAULT_SETTINGS.yellow, ...(settings.yellow || {}) };
   settings.targetYield = Number.isFinite(settings.targetYield) ? settings.targetYield : DEFAULT_SETTINGS.targetYield;
+  settings.importCookie = typeof settings.importCookie === "string" ? settings.importCookie : "";
 
   // Views & tabs
   const views = {
@@ -593,6 +689,7 @@ function parseImportText(text) {
     yellowMaxPricePerSqm: $("yellowMaxPricePerSqm"),
     yellowMinYield: $("yellowMinYield"),
     yellowMaxMultiplier: $("yellowMaxMultiplier"),
+    importCookie: $("importCookie"),
   };
 
   function loadSettingsToUi() {
@@ -604,6 +701,7 @@ function parseImportText(text) {
     settingsEls.yellowMaxPricePerSqm.value = String(settings.yellow.maxPricePerSqm);
     settingsEls.yellowMinYield.value = String(settings.yellow.minYield);
     settingsEls.yellowMaxMultiplier.value = String(settings.yellow.maxMultiplier);
+    settingsEls.importCookie.value = settings.importCookie || "";
   }
 
   function saveSettingsFromUi() {
@@ -615,6 +713,7 @@ function parseImportText(text) {
     settings.yellow.maxPricePerSqm = Number(settingsEls.yellowMaxPricePerSqm.value);
     settings.yellow.minYield = Number(settingsEls.yellowMinYield.value);
     settings.yellow.maxMultiplier = Number(settingsEls.yellowMaxMultiplier.value);
+    settings.importCookie = settingsEls.importCookie.value.trim();
     saveJson(STORAGE_KEYS.settings, settings);
   }
 
@@ -631,7 +730,7 @@ function parseImportText(text) {
   const offerForm = $("offerForm");
 
   function openOfferDialog(existing) {
-    $("dialogTitle").textContent = existing ? "Edit offer" : "Add offer";
+    $("dialogTitle").textContent = existing ? "Angebot bearbeiten" : "Angebot hinzufügen";
     $("offerId").value = existing?.id || "";
     $("offerTitle").value = existing?.title || "";
     $("offerUrl").value = existing?.url || "";
@@ -641,6 +740,7 @@ function parseImportText(text) {
     $("offerMonthlyUtilities").value = existing?.monthlyUtilities != null ? String(existing.monthlyUtilities) : "";
     $("offerMonthlyReserve").value = existing?.monthlyReserve != null ? String(existing.monthlyReserve) : "";
     $("offerNotes").value = existing?.notes || "";
+    $("btnDeleteOffer").classList.toggle("hidden", !existing);
     dialog.showModal();
   }
 
@@ -680,6 +780,16 @@ function parseImportText(text) {
     if (idx >= 0) offers[idx] = payload;
     else offers.unshift(payload);
 
+    saveJson(STORAGE_KEYS.offers, offers);
+    dialog.close();
+    renderOffers();
+  });
+
+  $("btnDeleteOffer").addEventListener("click", () => {
+    const id = $("offerId").value || "";
+    if (!id) return;
+    if (!confirm("Angebot wirklich löschen?")) return;
+    offers = offers.filter((o) => o.id !== id);
     saveJson(STORAGE_KEYS.offers, offers);
     dialog.close();
     renderOffers();
@@ -734,12 +844,6 @@ function parseImportText(text) {
         const offer = offers.find((o) => o.id === id);
         if (!offer) return;
         if (action === "edit") openOfferDialog(offer);
-        if (action === "delete") {
-          if (!confirm("Delete this offer?")) return;
-          offers = offers.filter((o) => o.id !== id);
-          saveJson(STORAGE_KEYS.offers, offers);
-          renderOffers();
-        }
       });
     });
   }
@@ -749,20 +853,44 @@ function parseImportText(text) {
 
   // Import flow
   let parsedOffers = [];
-  let lastImportWasUrl = false;
+  let lastImportSource = "manual";
+  let importNoticeBase = "";
+
+  function setFetchStatus(message, kind = "muted") {
+    const el = $("fetchStatus");
+    el.textContent = message || "";
+    el.classList.remove("status-error", "status-success");
+    if (kind === "error") el.classList.add("status-error");
+    if (kind === "success") el.classList.add("status-success");
+  }
+
+  function updateServerHint() {
+    const hint = $("serverHint");
+    const isLocalServer = location.protocol.startsWith("http");
+    const localHint = isLocalServer
+      ? importNoticeBase
+      : "URL-Import braucht den lokalen Server. Starte im Projektordner: python3 server.py und oeffne dann http://127.0.0.1:8000";
+    hint.classList.toggle("hidden", !localHint);
+    hint.textContent = localHint;
+    $("btnFetchUrl").disabled = !isLocalServer;
+  }
 
   function renderImportResults() {
     const panel = $("importResults");
     const grid = $("importGrid");
-    $("importCount").textContent = String(parsedOffers.length);
+    $("importCount").textContent = formatNumber(parsedOffers.length, 0);
     panel.classList.remove("hidden");
     const hint = $("importHint");
     if (parsedOffers.length === 0) {
-      hint.textContent = lastImportWasUrl
-        ? "URL detected. The MVP can’t fetch it directly from a local HTML file (login/CORS). Paste the page HTML source instead (View Source → copy)."
-        : "No offers found. ImmoScout results are often rendered via JavaScript, so “View Source” may not include offers. Try: (1) Save page as HTML and import the file here, or (2) DevTools Console: copy(document.documentElement.outerHTML) and paste it.";
+      hint.textContent =
+        lastImportSource === "url"
+          ? "Keine Angebote gefunden. Falls ImmoScout nur eine Login- oder Schutzseite geliefert hat, hinterlege optional den Cookie in den Einstellungen und versuche es erneut."
+          : "Keine Angebote gefunden. Falls die Seite stark per JavaScript gerendert wird, nutze alternativ den HTML-Fallback oder pruefe, ob die URL direkt zum Expose bzw. zur Suchseite fuehrt.";
     } else {
-      hint.textContent = "";
+      hint.textContent =
+        lastImportSource === "url"
+          ? "URL erfolgreich gelesen. Prüfe die Daten kurz und füge dann nur die gewünschten Angebote hinzu."
+          : "Analyse abgeschlossen. Prüfe die Daten kurz und füge dann die gewünschten Angebote hinzu.";
     }
     grid.innerHTML = parsedOffers.map((o) => renderCard(o, settings, { compact: true })).join("");
     $("btnAddParsed").disabled = parsedOffers.length === 0;
@@ -770,9 +898,56 @@ function parseImportText(text) {
 
   $("btnParseImport").addEventListener("click", () => {
     const text = $("importTextarea").value || "";
-    lastImportWasUrl = /^https?:\/\//i.test(text.trim());
+    lastImportSource = "manual";
     parsedOffers = parseImportText(text);
     renderImportResults();
+  });
+
+  $("btnFetchUrl").addEventListener("click", async () => {
+    const url = ($("importUrl").value || "").trim();
+    if (!url) {
+      setFetchStatus("Bitte zuerst eine URL eingeben.", "error");
+      return;
+    }
+
+    setFetchStatus("URL wird geladen...");
+    $("btnFetchUrl").disabled = true;
+
+    try {
+      const response = await fetch(FETCH_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url,
+          cookie: settings.importCookie || "",
+        }),
+      });
+
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        importNoticeBase = payload?.hint || "";
+        const statusInfo = payload?.status ? ` (HTTP ${payload.status})` : "";
+        const message =
+          payload?.status === 401 || payload?.status === 403
+            ? "ImmoScout verweigert den Abruf"
+            : payload?.error || "Abruf fehlgeschlagen.";
+        throw new Error(`${message}${statusInfo}`);
+      }
+
+      $("importTextarea").value = payload.html || "";
+      lastImportSource = "url";
+      importNoticeBase = "";
+      parsedOffers = parseImportText(payload.html || "");
+      renderImportResults();
+      setFetchStatus(`URL geladen${payload.status ? ` (HTTP ${payload.status})` : ""}.`, "success");
+    } catch (error) {
+      parsedOffers = [];
+      lastImportSource = "url";
+      renderImportResults();
+      setFetchStatus(error instanceof Error ? error.message : "Abruf fehlgeschlagen.", "error");
+    } finally {
+      updateServerHint();
+    }
   });
 
   $("importFile").addEventListener("change", () => {
@@ -783,7 +958,8 @@ function parseImportText(text) {
     reader.onload = () => {
       const text = typeof reader.result === "string" ? reader.result : "";
       $("importTextarea").value = text;
-      lastImportWasUrl = false;
+      lastImportSource = "file";
+      importNoticeBase = "";
       parsedOffers = parseImportText(text);
       renderImportResults();
     };
@@ -797,8 +973,11 @@ function parseImportText(text) {
     offers = [...toAdd, ...offers];
     saveJson(STORAGE_KEYS.offers, offers);
     parsedOffers = [];
+    importNoticeBase = "";
     renderImportResults();
+    $("importUrl").value = "";
     $("importTextarea").value = "";
+    setFetchStatus("");
     renderOffers();
     setTab("offers");
   });
@@ -808,25 +987,26 @@ function parseImportText(text) {
     const payload = JSON.stringify({ exportedAt: new Date().toISOString(), settings, offers }, null, 2);
     try {
       await navigator.clipboard.writeText(payload);
-      alert("Export copied to clipboard (JSON).");
+      alert("Export (JSON) in die Zwischenablage kopiert.");
     } catch {
-      prompt("Copy this JSON:", payload);
+      prompt("Bitte dieses JSON kopieren:", payload);
     }
   });
 
   $("btnReset").addEventListener("click", () => {
-    if (!confirm("Reset settings and offers stored in your browser for this app?")) return;
+    if (!confirm("Einstellungen und Angebote in deinem Browser für diese App wirklich löschen?")) return;
     localStorage.removeItem(STORAGE_KEYS.offers);
     localStorage.removeItem(STORAGE_KEYS.settings);
     offers = [];
     settings = structuredClone(DEFAULT_SETTINGS);
     loadSettingsToUi();
     renderOffers();
-    alert("Reset done.");
+    alert("Zurücksetzen abgeschlossen.");
   });
 
   // Initial render
   loadSettingsToUi();
+  updateServerHint();
   renderOffers();
   setTab("offers");
 }

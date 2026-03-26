@@ -1,27 +1,50 @@
 <!doctype html>
-<html lang="en">
+<html lang="de" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Flat Analyzer (MVP)</title>
+    <script>
+      (() => {
+        try {
+          const key = "flat_analyzer_theme_v1";
+          const raw = localStorage.getItem(key) || "light";
+          const setting = raw === "dark" || raw === "system" || raw === "light" ? raw : "light";
+          const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          const theme = setting === "system" ? (prefersDark ? "dark" : "light") : setting;
+          document.documentElement.dataset.themeSetting = setting;
+          document.documentElement.dataset.theme = theme;
+        } catch {
+          // ignore (e.g., localStorage blocked)
+        }
+      })();
+    </script>
+    <title>Wohnungs-Analyzer (MVP)</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <header class="app-header">
       <div class="container header-row">
         <div>
-          <h1>Flat Analyzer</h1>
-          <p class="muted">Traffic-light scoring for flat offers (local MVP).</p>
+          <h1>Wohnungs-Analyzer</h1>
+          <p class="muted">Ampel-Scoring für Wohnungsangebote (lokales MVP).</p>
         </div>
         <div class="header-actions">
-          <button id="btnExport" class="btn secondary" type="button">Export JSON</button>
-          <button id="btnReset" class="btn danger" type="button" title="Clears local data">Reset</button>
+          <label class="field compact theme-field">
+            <span class="label">Theme</span>
+            <select id="themeSelect" aria-label="Theme">
+              <option value="light">Hell</option>
+              <option value="dark">Dunkel</option>
+              <option value="system">System</option>
+            </select>
+          </label>
+          <button id="btnExport" class="btn secondary" type="button">Export (JSON)</button>
+          <button id="btnReset" class="btn danger" type="button" title="Lokale Daten löschen">Zurücksetzen</button>
         </div>
       </div>
-      <div class="container tabs" role="tablist" aria-label="Sections">
-        <button class="tab active" id="tabOffers" type="button" role="tab" aria-selected="true">Offers</button>
+      <div class="container tabs" role="tablist" aria-label="Bereiche">
+        <button class="tab active" id="tabOffers" type="button" role="tab" aria-selected="true">Angebote</button>
         <button class="tab" id="tabImport" type="button" role="tab" aria-selected="false">Import</button>
-        <button class="tab" id="tabSettings" type="button" role="tab" aria-selected="false">Settings</button>
+        <button class="tab" id="tabSettings" type="button" role="tab" aria-selected="false">Einstellungen</button>
       </div>
     </header>
 
@@ -30,27 +53,27 @@
         <div class="toolbar">
           <div class="toolbar-left">
             <label class="field compact">
-              <span class="label">Search</span>
-              <input id="searchInput" type="search" placeholder="Title, URL…" />
+              <span class="label">Suche</span>
+              <input id="searchInput" type="search" placeholder="Titel, URL…" />
             </label>
             <label class="field compact">
-              <span class="label">Sort</span>
+              <span class="label">Sortierung</span>
               <select id="sortSelect">
-                <option value="score">Score</option>
-                <option value="yield_desc">Yield (desc)</option>
-                <option value="ppsqm_asc">€/m² (asc)</option>
-                <option value="created_desc">Newest</option>
+                <option value="score">Ampel</option>
+                <option value="yield_desc">Rendite (absteigend)</option>
+                <option value="ppsqm_asc">€/m² (aufsteigend)</option>
+                <option value="created_desc">Neueste</option>
               </select>
             </label>
           </div>
           <div class="toolbar-right">
-            <button id="btnAddOffer" class="btn" type="button">Add offer</button>
+            <button id="btnAddOffer" class="btn" type="button">Angebot hinzufügen</button>
           </div>
         </div>
 
         <div id="offersEmpty" class="empty hidden">
-          <h2>No offers yet</h2>
-          <p class="muted">Add one manually, or paste a results page HTML in Import.</p>
+          <h2>Noch keine Angebote</h2>
+          <p class="muted">Füge ein Angebot manuell hinzu oder importiere HTML über „Import“.</p>
         </div>
 
         <div id="offersGrid" class="grid"></div>
@@ -60,28 +83,38 @@
         <div class="panel">
           <h2>Import</h2>
           <p class="muted">
-            MVP approach: paste the HTML source of your ImmoScout search results page (or paste JSON exported from this app).
-            Direct URL scanning often runs into logins/CORS; we can automate that later.
+            Primarer Weg: ImmoScout24-URL einfugen, HTML lokal abrufen und direkt analysieren. HTML oder Datei bleiben als Fallback verfugbar.
           </p>
+          <div class="import-stack">
+            <label class="field">
+              <span class="label">ImmoScout24-URL</span>
+              <input id="importUrl" type="url" placeholder="https://www.immobilienscout24.de/..." />
+            </label>
+            <div class="row">
+              <button id="btnFetchUrl" class="btn" type="button">URL abrufen & analysieren</button>
+              <span id="fetchStatus" class="muted small"></span>
+            </div>
+          </div>
+          <div id="serverHint" class="notice hidden"></div>
           <div class="row">
             <label class="field" style="flex: 1">
-              <span class="label">Or choose a saved HTML file</span>
+              <span class="label">Fallback: gespeicherte HTML-Datei auswahlen</span>
               <input id="importFile" type="file" accept=".html,.htm,.txt" />
             </label>
           </div>
           <label class="field">
-            <span class="label">Paste HTML or JSON</span>
-            <textarea id="importTextarea" rows="10" placeholder="Paste HTML source (Ctrl/Cmd+U → copy) or JSON array of offers…"></textarea>
+            <span class="label">Fallback: HTML oder JSON einfugen</span>
+            <textarea id="importTextarea" rows="8" placeholder="HTML-Quelltext oder JSON-Array einfugen..."></textarea>
           </label>
           <div class="row">
-            <button id="btnParseImport" class="btn" type="button">Parse</button>
-            <button id="btnAddParsed" class="btn secondary" type="button" disabled>Add parsed offers</button>
+            <button id="btnParseImport" class="btn" type="button">Analysieren</button>
+            <button id="btnAddParsed" class="btn secondary" type="button" disabled>Gefundene Angebote hinzufügen</button>
           </div>
         </div>
 
         <div id="importResults" class="panel hidden">
           <div class="row space-between">
-            <h3>Parsed offers</h3>
+            <h3>Gefundene Angebote</h3>
             <span id="importCount" class="pill">0</span>
           </div>
           <div id="importHint" class="muted small"></div>
@@ -91,59 +124,63 @@
 
       <section id="viewSettings" class="view hidden">
         <div class="panel">
-          <h2>Settings</h2>
-          <p class="muted">Adjust thresholds for green/yellow. Red is everything outside yellow. “Gray” means missing data.</p>
+          <h2>Einstellungen</h2>
+          <p class="muted">Passe Grenzwerte für Grün/Gelb an. Rot ist alles außerhalb von Gelb. „Grau“ bedeutet: Daten fehlen.</p>
 
           <div class="settings-grid">
             <div class="settings-card">
-              <h3>Assumptions</h3>
+              <h3>Annahmen</h3>
               <label class="field">
-                <span class="label">Purchase costs (%)</span>
+                <span class="label">Kaufnebenkosten (%)</span>
                 <input id="purchaseCostsPct" type="number" min="0" step="0.1" />
               </label>
               <label class="field">
-                <span class="label">Target gross yield (for “Price @ …”)</span>
+                <span class="label">Ziel-Bruttorendite (für „Maximaler Kaufpreis …“)</span>
                 <input id="targetYield" type="number" min="0" step="0.001" />
               </label>
-              <p class="muted small">Applied to price to approximate total acquisition cost.</p>
+              <label class="field">
+                <span class="label">ImmoScout-Cookie (optional, für Login-geschützte Seiten)</span>
+                <textarea id="importCookie" rows="3" placeholder="z. B. Cookie-Header aus dem Browser"></textarea>
+              </label>
+              <p class="muted small">Wird auf den Kaufpreis angewendet, um die Gesamtkosten grob abzuschätzen.</p>
             </div>
 
             <div class="settings-card">
-              <h3>Green</h3>
+              <h3>Grün</h3>
               <label class="field">
                 <span class="label">Max €/m²</span>
                 <input id="greenMaxPricePerSqm" type="number" min="0" step="1" />
               </label>
               <label class="field">
-                <span class="label">Min gross yield</span>
+                <span class="label">Min. Bruttorendite</span>
                 <input id="greenMinYield" type="number" min="0" step="0.001" />
               </label>
               <label class="field">
-                <span class="label">Max rent multiplier</span>
+                <span class="label">Max. Kaufpreisfaktor</span>
                 <input id="greenMaxMultiplier" type="number" min="0" step="0.1" />
               </label>
             </div>
 
             <div class="settings-card">
-              <h3>Yellow</h3>
+              <h3>Gelb</h3>
               <label class="field">
                 <span class="label">Max €/m²</span>
                 <input id="yellowMaxPricePerSqm" type="number" min="0" step="1" />
               </label>
               <label class="field">
-                <span class="label">Min gross yield</span>
+                <span class="label">Min. Bruttorendite</span>
                 <input id="yellowMinYield" type="number" min="0" step="0.001" />
               </label>
               <label class="field">
-                <span class="label">Max rent multiplier</span>
+                <span class="label">Max. Kaufpreisfaktor</span>
                 <input id="yellowMaxMultiplier" type="number" min="0" step="0.1" />
               </label>
             </div>
           </div>
 
           <div class="row">
-            <button id="btnSaveSettings" class="btn" type="button">Save settings</button>
-            <span id="settingsSaved" class="muted hidden">Saved.</span>
+            <button id="btnSaveSettings" class="btn" type="button">Einstellungen speichern</button>
+            <span id="settingsSaved" class="muted hidden">Gespeichert.</span>
           </div>
         </div>
       </section>
@@ -152,13 +189,13 @@
     <dialog id="offerDialog" class="dialog">
       <form id="offerForm" method="dialog" class="dialog-inner">
         <div class="row space-between">
-          <h2 id="dialogTitle">Add offer</h2>
-          <button class="icon-btn" value="cancel" aria-label="Close" type="submit">✕</button>
+          <h2 id="dialogTitle">Angebot hinzufügen</h2>
+          <button class="icon-btn" value="cancel" aria-label="Schließen" type="submit">✕</button>
         </div>
 
         <div class="two-col">
           <label class="field">
-            <span class="label">Title</span>
+            <span class="label">Titel</span>
             <input id="offerTitle" required />
           </label>
           <label class="field">
@@ -166,34 +203,39 @@
             <input id="offerUrl" placeholder="https://…" />
           </label>
           <label class="field">
-            <span class="label">Price (€)</span>
+            <span class="label">Kaufpreis (€)</span>
             <input id="offerPrice" type="number" min="0" step="1" required />
           </label>
           <label class="field">
-            <span class="label">Living area (m²)</span>
+            <span class="label">Wohnfläche (m²)</span>
             <input id="offerSqm" type="number" min="0" step="0.1" required />
           </label>
           <label class="field">
-            <span class="label">Monthly rent (€)</span>
+            <span class="label">Monatsmiete (€)</span>
             <input id="offerMonthlyRent" type="number" min="0" step="1" />
           </label>
           <label class="field">
-            <span class="label">Utility costs / Nebenkosten (€ / month)</span>
+            <span class="label">Nebenkosten (€ / Monat)</span>
             <input id="offerMonthlyUtilities" type="number" min="0" step="1" />
           </label>
           <label class="field">
-            <span class="label">Reserve / Rücklagen (€ / month)</span>
+            <span class="label">Rücklagen (€ / Monat)</span>
             <input id="offerMonthlyReserve" type="number" min="0" step="1" />
           </label>
           <div class="field">
-            <span class="label">Notes</span>
+            <span class="label">Notizen</span>
             <textarea id="offerNotes" rows="3" placeholder="Optional"></textarea>
           </div>
         </div>
 
         <menu class="row dialog-actions">
-          <button class="btn secondary" value="cancel" type="submit">Cancel</button>
-          <button id="btnSaveOffer" class="btn" value="default" type="submit">Save</button>
+          <button id="btnDeleteOffer" class="icon-btn danger hidden" type="button" title="Angebot löschen" aria-label="Angebot löschen">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 7h16M10 11v7M14 11v7M9 7l1-2h4l1 2M6 7l1 14h10l1-14" />
+            </svg>
+          </button>
+          <button class="btn secondary" value="cancel" type="submit">Abbrechen</button>
+          <button id="btnSaveOffer" class="btn" value="default" type="submit">Speichern</button>
         </menu>
         <input id="offerId" type="hidden" />
       </form>
