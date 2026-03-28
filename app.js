@@ -383,28 +383,232 @@ function extractSqm(text) {
   return clampNonNegative(parseGermanNumber(match[1]));
 }
 
-function bestEffortRent(text) {
+function extractFirstLabeledEuro(text, patterns) {
   const t = normalizeWhitespace(text);
-  const candidates = [];
+  for (const re of patterns) {
+    const match = t.match(re);
+    if (!match) continue;
+    const value = clampNonNegative(parseGermanNumber(match[1]));
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return undefined;
+}
 
-  const labeled = [
-    /mieteinnahmen[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
+function bestEffortRent(text) {
+  const labeledRent = extractFirstLabeledEuro(text, [
     /kaltmiete[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
-    /miete[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
-  ];
-  for (const re of labeled) {
-    const m = t.match(re);
-    if (m) candidates.push(parseGermanNumber(m[1]));
+    /mieteinnahmen[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
+    /(?:aktuelle\s+)?miete[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
+  ]);
+  if (Number.isFinite(labeledRent)) return labeledRent;
+
+  const t = normalizeWhitespace(text);
+  const fallbackAmounts = extractAllEuroAmounts(t).filter((value) => value >= 100);
+  if (!fallbackAmounts.length) return undefined;
+
+  // Without labels, the lower meaningful amount is often the monthly rent while the higher one is the price.
+  return Math.min(...fallbackAmounts);
+}
+
+function bestEffortUtilities(text) {
+  return extractFirstLabeledEuro(text, [
+    /nebenkosten[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
+    /hausgeld[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
+  ]);
+}
+
+function bestEffortReserve(text) {
+  return extractFirstLabeledEuro(text, [
+    /rücklagen[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
+    /ruecklagen[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
+    /instandhaltungsrücklage[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
+    /instandhaltungsruecklage[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
+  ]);
+}
+
+function normalizeIs24Url(rawUrl) {
+  if (!rawUrl) return undefined;
+  const cleaned = String(rawUrl).replace(/\\\//g, "/").trim();
+  if (!cleaned) return undefined;
+  if (cleaned.startsWith("http")) return cleaned;
+  if (cleaned.startsWith("//")) return `https:${cleaned}`;
+  if (cleaned.startsWith("/")) return `https://www.immobilienscout24.de${cleaned}`;
+  return undefined;
+}
+
+function decodeScriptValue(raw) {
+  if (!raw) return undefined;
+  return String(raw)
+    .replace(/\\u002F/gi, "/")
+    .replace(/\\u003a/gi, ":")
+    .replace(/\\u003d/gi, "=")
+    .replace(/\\u0026/gi, "&")
+    .replace(/\\"/g, '"')
+    .replace(/\\\//g, "/")
+    .trim();
+}
+
+function preferText(current, candidate) {
+  const a = normalizeWhitespace(current || "");
+  const b = normalizeWhitespace(candidate || "");
+  if (!b) return a || undefined;
+  if (!a) return b;
+  return b.length > a.length ? b : a;
+}
+
+function mergeOfferRecord(base, patch) {
+  if (!patch) return base;
+  base.title = preferText(base.title, patch.title) || base.title;
+  base.url = base.url || patch.url;
+  if (!Number.isFinite(base.price) || base.price <= 0) base.price = patch.price;
+  if (!Number.isFinite(base.sqm) || base.sqm <= 0) base.sqm = patch.sqm;
+  if (!Number.isFinite(base.monthlyRent) || base.monthlyRent <= 0) base.monthlyRent = patch.monthlyRent;
+  if (!Number.isFinite(base.monthlyUtilities) || base.monthlyUtilities <= 0) base.monthlyUtilities = patch.monthlyUtilities;
+  if (!Number.isFinite(base.monthlyReserve) || base.monthlyReserve <= 0) base.monthlyReserve = patch.monthlyReserve;
+  base.description = preferText(base.description, patch.description) || base.description;
+  base.notes = preferText(base.notes, patch.notes) || base.notes;
+  if (!base.source || base.source === "jsonld") base.source = patch.source || base.source;
+  return base;
+}
+
+function createOfferRecord(patch) {
+  return {
+    id: uid(),
+    title: patch.title || "ImmoScout Angebot",
+    url: patch.url,
+    price: Number.isFinite(patch.price) ? patch.price : 0,
+    sqm: Number.isFinite(patch.sqm) ? patch.sqm : 0,
+    monthlyRent: Number.isFinite(patch.monthlyRent) ? patch.monthlyRent : undefined,
+    monthlyUtilities: Number.isFinite(patch.monthlyUtilities) ? patch.monthlyUtilities : undefined,
+    monthlyReserve: Number.isFinite(patch.monthlyReserve) ? patch.monthlyReserve : undefined,
+    description: patch.description,
+    notes: patch.notes,
+    source: patch.source || "immoscout-html",
+    createdAt: Date.now(),
+  };
+}
+
+function upsertOffer(map, patch) {
+  const url = normalizeIs24Url(patch.url);
+  const key = url || normalizeWhitespace(patch.title || "");
+  if (!key) return;
+  const normalizedPatch = { ...patch, url };
+  if (!map.has(key)) {
+    map.set(key, createOfferRecord(normalizedPatch));
+    return;
+  }
+  mergeOfferRecord(map.get(key), normalizedPatch);
+}
+
+function extractValueFromSnippet(snippet, patterns) {
+  for (const re of patterns) {
+    const match = snippet.match(re);
+    if (match) return match[1];
+  }
+  return undefined;
+}
+
+function extractOffersFromScriptBlobs(htmlText) {
+  const offers = [];
+  const exposeRegex = /(?:https?:)?\\?\/\\?\/www\.immobilienscout24\.de\\?\/(?:kaufen|mieten)?[^"'\\\s]*\\?\/expose\\?\/\d+|\\?\/expose\\?\/\d+/gi;
+  const seen = new Set();
+  let match;
+
+  while ((match = exposeRegex.exec(htmlText))) {
+    const rawUrl = decodeScriptValue(match[0]);
+    const url = normalizeIs24Url(rawUrl);
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+
+    const start = Math.max(0, match.index - 1200);
+    const end = Math.min(htmlText.length, match.index + match[0].length + 1600);
+    const snippet = htmlText.slice(start, end);
+    const decodedSnippet = decodeScriptValue(snippet);
+
+    const title = extractValueFromSnippet(decodedSnippet, [
+      /"(?:title|headline|name)"\s*:\s*"([^"]{6,220})"/i,
+      /"title"\s*:\s*\{"text"\s*:\s*"([^"]{6,220})"/i,
+    ]);
+    const priceRaw = extractValueFromSnippet(decodedSnippet, [
+      /"(?:purchasePrice|propertyPrice|price)"\s*:\s*"?(\d[\d.,]*)"?/i,
+      /"(?:calculatedTotalRent|baseRent|netColdRent)"\s*:\s*"?(\d[\d.,]*)"?/i,
+    ]);
+    const sqmRaw = extractValueFromSnippet(decodedSnippet, [
+      /"(?:livingSpace|squareMeters|wohnflaeche)"\s*:\s*"?(\d[\d.,]*)"?/i,
+    ]);
+    const rentRaw = extractValueFromSnippet(decodedSnippet, [
+      /"(?:baseRent|netColdRent|calculatedTotalRent|rent)"\s*:\s*"?(\d[\d.,]*)"?/i,
+    ]);
+    const utilitiesRaw = extractValueFromSnippet(decodedSnippet, [
+      /"(?:serviceCharge|additionalCosts|operatingCosts|hausgeld|utilities)"\s*:\s*"?(\d[\d.,]*)"?/i,
+    ]);
+    const reserveRaw = extractValueFromSnippet(decodedSnippet, [
+      /"(?:reserve|ruecklage|rücklage|maintenanceReserve)"\s*:\s*"?(\d[\d.,]*)"?/i,
+    ]);
+
+    offers.push({
+      url,
+      title: title ? normalizeWhitespace(title) : undefined,
+      price: clampNonNegative(parseGermanNumber(priceRaw)),
+      sqm: clampNonNegative(parseGermanNumber(sqmRaw)),
+      monthlyRent: clampNonNegative(parseGermanNumber(rentRaw)),
+      monthlyUtilities: clampNonNegative(parseGermanNumber(utilitiesRaw)) ?? bestEffortUtilities(decodedSnippet),
+      monthlyReserve: clampNonNegative(parseGermanNumber(reserveRaw)) ?? bestEffortReserve(decodedSnippet),
+      source: "immoscout-script",
+    });
   }
 
-  const fallback = extractEuroAmount(t);
-  if (Number.isFinite(fallback)) candidates.push(fallback);
+  return offers;
+}
 
-  const filtered = candidates.map(clampNonNegative).filter((n) => Number.isFinite(n) && n > 0);
-  if (!filtered.length) return undefined;
+function extractOffersFromAnchorContainers(doc) {
+  const offersByKey = new Map();
+  const anchorSets = [
+    ...doc.querySelectorAll('a[href*="/expose/"]'),
+    ...doc.querySelectorAll('a[href*="expose"]'),
+    ...doc.querySelectorAll('[data-testid] a[href*="/expose/"]'),
+    ...doc.querySelectorAll('article a[href*="/expose/"]'),
+  ];
 
-  // Heuristic: rents usually smaller than prices; pick the smallest meaningful € amount.
-  return Math.min(...filtered);
+  for (const a of anchorSets) {
+    const href = a.getAttribute("href") || "";
+    const url = normalizeIs24Url(href);
+    if (!url || url.length < 8) continue;
+
+    const container =
+      a.closest("article") ||
+      a.closest('[role="article"]') ||
+      a.closest('[data-testid*="result"]') ||
+      a.closest('[data-testid*="listing"]') ||
+      a.closest('[class*="result"]') ||
+      a.closest('[class*="listing"]') ||
+      a.closest("li") ||
+      a.closest("[data-testid]") ||
+      a.closest("div") ||
+      a;
+    const text = normalizeWhitespace(container.textContent || "");
+
+    const title =
+      normalizeWhitespace(
+        a.getAttribute("aria-label") ||
+          container.querySelector("h2,h3,[data-testid*='title']")?.textContent ||
+          a.textContent ||
+          ""
+      ) || "ImmoScout Angebot";
+
+    upsertOffer(offersByKey, {
+      title,
+      url,
+      price: bestEffortPrice(text),
+      sqm: extractSqm(text),
+      monthlyRent: bestEffortRent(text),
+      monthlyUtilities: bestEffortUtilities(text),
+      monthlyReserve: bestEffortReserve(text),
+      source: "immoscout-html",
+    });
+  }
+
+  return [...offersByKey.values()];
 }
 
 function parseOffersFromJson(text) {
@@ -497,7 +701,8 @@ function parseOffersFromHtml(htmlText) {
 
   // 1) Try structured data (JSON-LD) first. Many real-estate portals embed an ItemList/Product data blob
   // in the HTML source even when the visible results are rendered client-side.
-  const jsonLdOffers = [];
+  /** @type {Map<string, Offer>} */
+  const offersByKey = new Map();
   const jsonLdScripts = [...doc.querySelectorAll('script[type="application/ld+json"]')];
   for (const s of jsonLdScripts) {
     const raw = (s.textContent || "").trim();
@@ -523,17 +728,45 @@ function parseOffersFromHtml(htmlText) {
                     ? el.item.headline
                     : undefined;
             if (!url) continue;
-            jsonLdOffers.push({
-              id: uid(),
+            upsertOffer(offersByKey, {
               title: normalizeWhitespace(title || "Angebot"),
               url,
-              price: 0,
-              sqm: 0,
-              monthlyRent: undefined,
               notes:
                 "Aus JSON-LD importiert (Preis/Wohnfläche fehlen im HTML-Quelltext). Öffne das Exposé und ergänze die Zahlen manuell oder füge den vollständig gerenderten DOM ein.",
               source: "jsonld",
-              createdAt: Date.now(),
+            });
+          }
+        }
+
+        if (n && typeof n?.item === "object") {
+          upsertOffer(offersByKey, {
+            title: typeof n.item?.name === "string" ? n.item.name : undefined,
+            url: typeof n.item?.url === "string" ? n.item.url : undefined,
+            price:
+              typeof n.item?.offers?.price === "number"
+                ? n.item.offers.price
+                : typeof n.item?.offers?.price === "string"
+                  ? Number(n.item.offers.price)
+                  : undefined,
+            sqm:
+              typeof n.item?.floorSize?.value === "number"
+                ? n.item.floorSize.value
+                : typeof n.item?.floorSize?.value === "string"
+                  ? Number(n.item.floorSize.value)
+                  : undefined,
+            source: "jsonld",
+          });
+        }
+
+        if (Array.isArray(n?.resultListEntries)) {
+          for (const entry of n.resultListEntries) {
+            upsertOffer(offersByKey, {
+              title: entry?.title || entry?.name,
+              url: entry?.url || entry?.targetUrl,
+              price: clampNonNegative(parseGermanNumber(entry?.price?.value || entry?.price)),
+              sqm: clampNonNegative(parseGermanNumber(entry?.livingSpace || entry?.squareMeters)),
+              monthlyRent: clampNonNegative(parseGermanNumber(entry?.baseRent || entry?.rent)),
+              source: "jsonld",
             });
           }
         }
@@ -554,15 +787,12 @@ function parseOffersFromHtml(htmlText) {
               ? Number(n.floorSize.value)
               : undefined;
         if (url && title && (Number.isFinite(price) || Number.isFinite(sqm))) {
-          jsonLdOffers.push({
-            id: uid(),
+          upsertOffer(offersByKey, {
             title: normalizeWhitespace(title),
             url,
-            price: Number.isFinite(price) ? price : 0,
-            sqm: Number.isFinite(sqm) ? sqm : 0,
-            monthlyRent: undefined,
             source: "jsonld",
-            createdAt: Date.now(),
+            price,
+            sqm,
           });
         }
         }
@@ -572,67 +802,20 @@ function parseOffersFromHtml(htmlText) {
     }
   }
 
-  // If JSON-LD gave us at least URLs, keep it as a fallback result.
-  const jsonLdDeduped = [];
-  const seenJsonLd = new Set();
-  for (const o of jsonLdOffers) {
-    const key = o.url || o.title;
-    if (!key || seenJsonLd.has(key)) continue;
-    seenJsonLd.add(key);
-    jsonLdDeduped.push(o);
+  for (const offer of extractOffersFromScriptBlobs(htmlText)) {
+    upsertOffer(offersByKey, offer);
   }
 
-  /** @type {Map<string, Offer>} */
-  const byUrl = new Map();
-  const anchors = [
-    ...doc.querySelectorAll('a[href*="/expose/"]'),
-    ...doc.querySelectorAll('a[href*="expose"]'),
-  ];
-
-  for (const a of anchors) {
-    const href = a.getAttribute("href") || "";
-    const url = href.startsWith("http") ? href : href.startsWith("/") ? `https://www.immobilienscout24.de${href}` : href;
-    if (!url || url.length < 8) continue;
-
-    // Climb a bit to capture price/area text near the link.
-    const container =
-      a.closest("article") ||
-      a.closest('[role="article"]') ||
-      a.closest("li") ||
-      a.closest("[data-testid]") ||
-      a.closest("div") ||
-      a;
-    const text = normalizeWhitespace(container.textContent || "");
-
-    const price = bestEffortPrice(text);
-    const sqm = extractSqm(text);
-    const monthlyRent = bestEffortRent(text);
-    const title =
-      normalizeWhitespace(a.getAttribute("aria-label") || "") ||
-      normalizeWhitespace(a.textContent || "") ||
-      "ImmoScout Angebot";
-
-    if (!Number.isFinite(price) || !Number.isFinite(sqm)) continue;
-
-    if (!byUrl.has(url)) {
-      byUrl.set(url, {
-        id: uid(),
-        title,
-        url,
-        price,
-        sqm,
-        monthlyRent,
-        source: "immoscout-html",
-        createdAt: Date.now(),
-      });
-    }
+  for (const offer of extractOffersFromAnchorContainers(doc)) {
+    upsertOffer(offersByKey, offer);
   }
 
-  const extracted = [...byUrl.values()];
-  if (extracted.length > 0) return extracted;
+  const mergedOffers = [...offersByKey.values()];
+  const completeOffers = mergedOffers.filter((offer) => Number.isFinite(offer.price) && offer.price > 0 && Number.isFinite(offer.sqm) && offer.sqm > 0);
+  if (completeOffers.length > 0) return completeOffers;
 
   // Final fallback: if we couldn't extract full price+sqm cards, return JSON-LD URL list if available.
-  return jsonLdDeduped;
+  return mergedOffers;
 }
 
 function parseImportText(text) {
