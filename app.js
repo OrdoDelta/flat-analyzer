@@ -124,6 +124,20 @@ function toHostLabel(url) {
   }
 }
 
+function resolveSourceName(offer) {
+  const url = typeof offer?.url === "string" ? offer.url : "";
+  const host = url ? toHostLabel(url) : "";
+  if (host && host.includes("immobilienscout24.de")) return "ImmoScout";
+  if (host) return host;
+
+  const source = typeof offer?.source === "string" ? offer.source : "";
+  if (!source) return "Unbekannt";
+  if (source === "manual") return "Manuell";
+  if (source === "import-json") return "Import (JSON)";
+  if (source.toLowerCase().includes("immoscout")) return "ImmoScout";
+  return source;
+}
+
 function clampNonNegative(n) {
   if (!Number.isFinite(n)) return undefined;
   return Math.max(0, n);
@@ -204,9 +218,11 @@ function renderCard(offer, settings, { compact = false } = {}) {
   if (!Number.isFinite(offer.monthlyRent)) missingFields.push("Miete");
   const missingHtml = compact && missingFields.length ? `<div class="card-meta">Fehlende Angaben: ${escapeHtml(missingFields.join(", "))}</div>` : "";
 
-  const urlHtml = offer.url
-    ? `<a href="${escapeHtmlAttr(offer.url)}" target="_blank" rel="noreferrer">Öffnen</a>`
-    : `<span class="muted small">Keine URL</span>`;
+  const sourceName = resolveSourceName(offer);
+  const sourceValueHtml = offer.url
+    ? `<a href="${escapeHtmlAttr(offer.url)}" target="_blank" rel="noreferrer">${escapeHtml(sourceName)}</a>`
+    : `<span>${escapeHtml(sourceName)}</span>`;
+  const sourceHtml = `<div class="card-source"><span class="k">Quelle:</span> ${sourceValueHtml}</div>`;
 
   const notesHtml = offer.notes ? `<div class="reasons">${escapeHtml(offer.notes)}</div>` : "";
   const descriptionText = normalizeWhitespace(offer.description || "");
@@ -215,9 +231,6 @@ function renderCard(offer, settings, { compact = false } = {}) {
     : "";
   const reasons = evalResult.reasons.length ? evalResult.reasons.join(" ") : "";
   const reasonsHtml = reasons ? `<div class="card-meta">${escapeHtml(reasons)}</div>` : "";
-  const sourceTagHtml = offer.source ? `<span class="meta-pill">${escapeHtml(offer.source)}</span>` : "";
-  const hostTagHtml = offer.url ? `<span class="meta-pill">${escapeHtml(toHostLabel(offer.url))}</span>` : "";
-
   const editButtonHtml = compact
     ? ""
     : `<button class="icon-btn icon-btn--small" type="button" data-action="edit" data-id="${offer.id}" aria-label="Bearbeiten" title="Bearbeiten">
@@ -232,9 +245,7 @@ function renderCard(offer, settings, { compact = false } = {}) {
       <div class="card-head">
         <div class="card-head-main">
           <h3>${escapeHtml(offer.title || "Ohne Titel")}</h3>
-          <div class="row card-links">
-            ${urlHtml}
-          </div>
+          ${sourceHtml}
         </div>
         <div class="card-head-right">
           ${editButtonHtml}
@@ -245,7 +256,7 @@ function renderCard(offer, settings, { compact = false } = {}) {
         </div>
       </div>
       <div class="card-hero">
-        <div class="hero-metric hero-metric--price">
+        <div class="hero-metric hero-metric--price hero-metric--full">
           <div class="k">Kaufpreis</div>
           <div class="hero-value">${formatEuro(offer.price)}</div>
         </div>
@@ -257,10 +268,6 @@ function renderCard(offer, settings, { compact = false } = {}) {
           <div class="k">€/m²</div>
           <div class="hero-value">${formatEuro(pricePerSqm)}</div>
         </div>
-      </div>
-      <div class="card-meta-row">
-        ${hostTagHtml}
-        ${sourceTagHtml}
       </div>
       ${missingHtml}
       <div class="kv card-kv">
@@ -855,6 +862,7 @@ function parseImportText(text) {
   let parsedOffers = [];
   let lastImportSource = "manual";
   let importNoticeBase = "";
+  let lastFetchBlockedReason = "";
 
   function setFetchStatus(message, kind = "muted") {
     const el = $("fetchStatus");
@@ -884,7 +892,9 @@ function parseImportText(text) {
     if (parsedOffers.length === 0) {
       hint.textContent =
         lastImportSource === "url"
-          ? "Keine Angebote gefunden. Falls ImmoScout nur eine Login- oder Schutzseite geliefert hat, hinterlege optional den Cookie in den Einstellungen und versuche es erneut."
+          ? lastFetchBlockedReason
+            ? "Kein verwertbares Expose gefunden. Der Abruf wurde wahrscheinlich durch Login- oder Schutzmechanismen abgefangen. Hinterlege optional den Cookie in den Einstellungen und versuche es erneut."
+            : "Keine Angebote gefunden. Falls ImmoScout nur eine Login- oder Schutzseite geliefert hat, hinterlege optional den Cookie in den Einstellungen und versuche es erneut."
           : "Keine Angebote gefunden. Falls die Seite stark per JavaScript gerendert wird, nutze alternativ den HTML-Fallback oder pruefe, ob die URL direkt zum Expose bzw. zur Suchseite fuehrt.";
     } else {
       hint.textContent =
@@ -899,6 +909,7 @@ function parseImportText(text) {
   $("btnParseImport").addEventListener("click", () => {
     const text = $("importTextarea").value || "";
     lastImportSource = "manual";
+    lastFetchBlockedReason = "";
     parsedOffers = parseImportText(text);
     renderImportResults();
   });
@@ -926,10 +937,13 @@ function parseImportText(text) {
       const payload = await response.json();
       if (!response.ok || !payload.ok) {
         importNoticeBase = payload?.hint || "";
+        lastFetchBlockedReason = payload?.blockedReason || "";
         const statusInfo = payload?.status ? ` (HTTP ${payload.status})` : "";
         const message =
           payload?.status === 401 || payload?.status === 403
             ? "ImmoScout verweigert den Abruf"
+            : payload?.blockedReason
+              ? "ImmoScout hat nur eine Login- oder Schutzseite geliefert"
             : payload?.error || "Abruf fehlgeschlagen.";
         throw new Error(`${message}${statusInfo}`);
       }
@@ -937,6 +951,7 @@ function parseImportText(text) {
       $("importTextarea").value = payload.html || "";
       lastImportSource = "url";
       importNoticeBase = "";
+      lastFetchBlockedReason = "";
       parsedOffers = parseImportText(payload.html || "");
       renderImportResults();
       setFetchStatus(`URL geladen${payload.status ? ` (HTTP ${payload.status})` : ""}.`, "success");
@@ -960,6 +975,7 @@ function parseImportText(text) {
       $("importTextarea").value = text;
       lastImportSource = "file";
       importNoticeBase = "";
+      lastFetchBlockedReason = "";
       parsedOffers = parseImportText(text);
       renderImportResults();
     };
@@ -974,6 +990,7 @@ function parseImportText(text) {
     saveJson(STORAGE_KEYS.offers, offers);
     parsedOffers = [];
     importNoticeBase = "";
+    lastFetchBlockedReason = "";
     renderImportResults();
     $("importUrl").value = "";
     $("importTextarea").value = "";
