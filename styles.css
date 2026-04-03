@@ -329,6 +329,13 @@ html[data-theme="dark"] .hero-metric--price {
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field.compact .label { font-size: 12px; color: var(--muted); }
 .label { font-size: 13px; color: var(--muted); }
+.field.field-missing .label { color: var(--danger-text); font-weight: 700; }
+.field.field-missing input,
+.field.field-missing textarea,
+.field.field-missing select {
+  border-color: var(--danger-border);
+  background: color-mix(in srgb, var(--danger-bg) 45%, var(--input-bg));
+}
 input, textarea, select {
   background: var(--input-bg);
   border: 1px solid var(--border);

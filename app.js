@@ -107,6 +107,16 @@ function formatNumber(value, digits = 2) {
   return new Intl.NumberFormat(LOCALE, { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value);
 }
 
+function formatFormNumber(value, digits = 2) {
+  if (!Number.isFinite(value)) return "";
+  const maximumFractionDigits = Number.isInteger(value) ? 0 : digits;
+  return new Intl.NumberFormat(LOCALE, {
+    useGrouping: false,
+    minimumFractionDigits: 0,
+    maximumFractionDigits,
+  }).format(value);
+}
+
 function formatPercent(value, digits = 2) {
   if (!Number.isFinite(value)) return "—";
   return new Intl.NumberFormat(LOCALE, {
@@ -338,9 +348,22 @@ function parseGermanNumber(raw) {
   // Common German formats: 1.234.567,89 or 1234,56
   const noSpaces = cleaned.replace(/\s+/g, "");
   const hasComma = noSpaces.includes(",");
-  const normalized = hasComma ? noSpaces.replaceAll(".", "").replace(",", ".") : noSpaces.replaceAll(".", "");
+  let normalized;
+  if (hasComma) {
+    normalized = noSpaces.replaceAll(".", "").replace(",", ".");
+  } else if (/^\d+\.\d+$/.test(noSpaces)) {
+    normalized = noSpaces;
+  } else {
+    normalized = noSpaces.replaceAll(".", "");
+  }
   const n = Number(normalized);
   return Number.isFinite(n) ? n : undefined;
+}
+
+function coerceGermanNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "string") return parseGermanNumber(value);
+  return undefined;
 }
 
 function extractEuroAmount(text) {
@@ -383,47 +406,181 @@ function extractSqm(text) {
   return clampNonNegative(parseGermanNumber(match[1]));
 }
 
-function extractFirstLabeledEuro(text, patterns) {
+const FIELD_PRIORITY = {
+  price: { script: 400, jsonld: 300, text_labeled: 200, text_fallback: 100 },
+  sqm: { script: 400, jsonld: 300, text_labeled: 200, text_fallback: 100 },
+  monthlyRent: {
+    text_expose_breakdown: 700,
+    text_kaltmiete: 600,
+    text_mieteinnahmen: 500,
+    text_miete: 400,
+    script: 300,
+    jsonld: 200,
+    text_fallback: 100,
+  },
+  monthlyUtilities: { text_expose_breakdown: 500, text_labeled: 400, script: 300, jsonld: 200 },
+  monthlyReserve: { text_expose_breakdown: 500, text_labeled: 400, script: 300, jsonld: 200 },
+};
+
+const SOURCE_PRIORITY = {
+  jsonld: 100,
+  "immoscout-html": 200,
+  "immoscout-script": 300,
+  "immoscout-expose-html": 400,
+};
+
+function buildFieldCandidate(field, value, priorityKey) {
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  const priority = FIELD_PRIORITY[field]?.[priorityKey] || 0;
+  return { value, priority, priorityKey };
+}
+
+function pickBetterFieldCandidate(current, candidate) {
+  if (!candidate) return current;
+  if (!current) return candidate;
+  return candidate.priority > current.priority ? candidate : current;
+}
+
+function pickBestFieldCandidate(field, candidates) {
+  return candidates.reduce((best, candidate) => pickBetterFieldCandidate(best, candidate), undefined);
+}
+
+function extractFirstLabeledEuroCandidate(field, text, patterns) {
   const t = normalizeWhitespace(text);
-  for (const re of patterns) {
+  for (const { re, priorityKey } of patterns) {
     const match = t.match(re);
     if (!match) continue;
     const value = clampNonNegative(parseGermanNumber(match[1]));
-    if (Number.isFinite(value) && value > 0) return value;
+    if (Number.isFinite(value) && value > 0) return buildFieldCandidate(field, value, priorityKey);
   }
   return undefined;
 }
 
-function bestEffortRent(text) {
-  const labeledRent = extractFirstLabeledEuro(text, [
-    /kaltmiete[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
-    /mieteinnahmen[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
-    /(?:aktuelle\s+)?miete[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
+function extractPriceCandidateFromText(text) {
+  const labeledPrice = extractFirstLabeledEuroCandidate("price", text, [
+    { re: /kaufpreis[^\d€]{0,40}(\d[\d\s.,]*)\s*€/i, priorityKey: "text_labeled" },
+    { re: /preis[^\d€]{0,40}(\d[\d\s.,]*)\s*€/i, priorityKey: "text_labeled" },
   ]);
-  if (Number.isFinite(labeledRent)) return labeledRent;
+  if (labeledPrice) return labeledPrice;
+
+  const t = normalizeWhitespace(text);
+  const all = extractAllEuroAmounts(t);
+  if (!all.length) return undefined;
+  return buildFieldCandidate("price", Math.max(...all), "text_fallback");
+}
+
+function extractSqmCandidateFromText(text) {
+  return buildFieldCandidate("sqm", extractSqm(text), "text_labeled");
+}
+
+function extractRentCandidateFromText(text) {
+  const labeledRent = extractFirstLabeledEuroCandidate("monthlyRent", text, [
+    { re: /kaltmiete[^\d€]{0,40}(\d[\d\s.,]*)\s*€/i, priorityKey: "text_kaltmiete" },
+    { re: /mieteinnahmen[^\d€]{0,40}(\d[\d\s.,]*)\s*€/i, priorityKey: "text_mieteinnahmen" },
+    { re: /(?:aktuelle\s+)?miete[^\d€]{0,40}(\d[\d\s.,]*)\s*€/i, priorityKey: "text_miete" },
+  ]);
+  if (labeledRent) return labeledRent;
 
   const t = normalizeWhitespace(text);
   const fallbackAmounts = extractAllEuroAmounts(t).filter((value) => value >= 100);
   if (!fallbackAmounts.length) return undefined;
-
-  // Without labels, the lower meaningful amount is often the monthly rent while the higher one is the price.
-  return Math.min(...fallbackAmounts);
+  return buildFieldCandidate("monthlyRent", Math.min(...fallbackAmounts), "text_fallback");
 }
 
-function bestEffortUtilities(text) {
-  return extractFirstLabeledEuro(text, [
-    /nebenkosten[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
-    /hausgeld[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
+function extractUtilitiesCandidateFromText(text) {
+  return extractFirstLabeledEuroCandidate("monthlyUtilities", text, [
+    { re: /nebenkosten[^\d€]{0,40}(\d[\d\s.,]*)\s*€/i, priorityKey: "text_labeled" },
+    { re: /hausgeld[^\d€]{0,40}(\d[\d\s.,]*)\s*€/i, priorityKey: "text_labeled" },
   ]);
 }
 
-function bestEffortReserve(text) {
-  return extractFirstLabeledEuro(text, [
-    /rücklagen[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
-    /ruecklagen[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
-    /instandhaltungsrücklage[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
-    /instandhaltungsruecklage[^€]{0,40}(\d[\d\s.,]*)\s*€/i,
+function extractReserveCandidateFromText(text) {
+  return extractFirstLabeledEuroCandidate("monthlyReserve", text, [
+    { re: /rücklagen[^\d€]{0,40}(\d[\d\s.,]*)\s*€/i, priorityKey: "text_labeled" },
+    { re: /ruecklagen[^\d€]{0,40}(\d[\d\s.,]*)\s*€/i, priorityKey: "text_labeled" },
+    { re: /instandhaltungsrücklage[^\d€]{0,40}(\d[\d\s.,]*)\s*€/i, priorityKey: "text_labeled" },
+    { re: /instandhaltungsruecklage[^\d€]{0,40}(\d[\d\s.,]*)\s*€/i, priorityKey: "text_labeled" },
   ]);
+}
+
+function scoreExposeRentBreakdownText(text) {
+  const raw = String(text || "");
+  let score = 0;
+  if (/kaltmiete/i.test(raw)) score += 3;
+  if (/nebenkosten|hausgeld/i.test(raw)) score += 2;
+  if (/rücklagen|ruecklagen|instandhaltungsrücklage|instandhaltungsruecklage/i.test(raw)) score += 2;
+  return score;
+}
+
+function findExposeRentBreakdownText(doc) {
+  const blocks = Array.from(doc.querySelectorAll("#common-content-section pre"))
+    .map((node) => String(node.textContent || "").trim())
+    .filter(Boolean)
+    .map((text) => ({ text, score: scoreExposeRentBreakdownText(text) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || b.text.length - a.text.length);
+
+  return blocks[0]?.text;
+}
+
+function splitMeaningfulLines(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\u00a0/g, " ").trim())
+    .filter(Boolean);
+}
+
+function extractFieldCandidateFromLines(field, text, patterns, priorityKey) {
+  const lines = splitMeaningfulLines(text);
+  for (const line of lines) {
+    for (const re of patterns) {
+      const match = line.match(re);
+      if (!match) continue;
+      const value = clampNonNegative(parseGermanNumber(match[1]));
+      if (Number.isFinite(value) && value > 0) return buildFieldCandidate(field, value, priorityKey);
+    }
+  }
+  return undefined;
+}
+
+function extractExposeRentCandidateFromBreakdown(text) {
+  return extractFieldCandidateFromLines(
+    "monthlyRent",
+    text,
+    [
+      /(?:^|[-•]\s*)aktuelle\s+kaltmiete[^\d€\n]{0,40}(\d[\d\s.,]*)\s*€/i,
+      /(?:^|[-•]\s*)kaltmiete[^\d€\n]{0,40}(\d[\d\s.,]*)\s*€/i,
+      /(?:^|[-•]\s*)mieteinnahmen[^\d€\n]{0,40}(\d[\d\s.,]*)\s*€/i,
+      /(?:^|[-•]\s*)(?:aktuelle\s+)?miete[^\d€\n]{0,40}(\d[\d\s.,]*)\s*€/i,
+    ],
+    "text_expose_breakdown",
+  );
+}
+
+function extractExposeUtilitiesCandidateFromBreakdown(text) {
+  return extractFieldCandidateFromLines(
+    "monthlyUtilities",
+    text,
+    [
+      /(?:^|[-•]\s*)nebenkosten[^\d€\n]{0,40}(\d[\d\s.,]*)\s*€/i,
+      /(?:^|[-•]\s*)hausgeld[^\d€\n]{0,40}(\d[\d\s.,]*)\s*€/i,
+    ],
+    "text_expose_breakdown",
+  );
+}
+
+function extractExposeReserveCandidateFromBreakdown(text) {
+  return extractFieldCandidateFromLines(
+    "monthlyReserve",
+    text,
+    [
+      /(?:^|[-•]\s*)rücklagen[^\d€\n]{0,40}(\d[\d\s.,]*)\s*€/i,
+      /(?:^|[-•]\s*)ruecklagen[^\d€\n]{0,40}(\d[\d\s.,]*)\s*€/i,
+      /(?:^|[-•]\s*)instandhaltungsrücklage[^\d€\n]{0,40}(\d[\d\s.,]*)\s*€/i,
+      /(?:^|[-•]\s*)instandhaltungsruecklage[^\d€\n]{0,40}(\d[\d\s.,]*)\s*€/i,
+    ],
+    "text_expose_breakdown",
+  );
 }
 
 function normalizeIs24Url(rawUrl) {
@@ -456,36 +613,53 @@ function preferText(current, candidate) {
   return b.length > a.length ? b : a;
 }
 
+function createEmptyOfferRecord() {
+  return {
+    id: uid(),
+    title: "ImmoScout Angebot",
+    url: undefined,
+    price: 0,
+    sqm: 0,
+    monthlyRent: undefined,
+    monthlyUtilities: undefined,
+    monthlyReserve: undefined,
+    description: undefined,
+    notes: undefined,
+    source: "jsonld",
+    createdAt: Date.now(),
+    _fieldCandidates: {},
+  };
+}
+
+function setOfferField(record, field, candidate) {
+  if (!candidate) return;
+  const current = record._fieldCandidates[field];
+  const chosen = pickBetterFieldCandidate(current, candidate);
+  if (chosen !== current) {
+    record._fieldCandidates[field] = chosen;
+    record[field] = chosen.value;
+  }
+}
+
 function mergeOfferRecord(base, patch) {
   if (!patch) return base;
   base.title = preferText(base.title, patch.title) || base.title;
   base.url = base.url || patch.url;
-  if (!Number.isFinite(base.price) || base.price <= 0) base.price = patch.price;
-  if (!Number.isFinite(base.sqm) || base.sqm <= 0) base.sqm = patch.sqm;
-  if (!Number.isFinite(base.monthlyRent) || base.monthlyRent <= 0) base.monthlyRent = patch.monthlyRent;
-  if (!Number.isFinite(base.monthlyUtilities) || base.monthlyUtilities <= 0) base.monthlyUtilities = patch.monthlyUtilities;
-  if (!Number.isFinite(base.monthlyReserve) || base.monthlyReserve <= 0) base.monthlyReserve = patch.monthlyReserve;
   base.description = preferText(base.description, patch.description) || base.description;
   base.notes = preferText(base.notes, patch.notes) || base.notes;
-  if (!base.source || base.source === "jsonld") base.source = patch.source || base.source;
+  if ((SOURCE_PRIORITY[patch.source] || 0) > (SOURCE_PRIORITY[base.source] || 0)) base.source = patch.source;
+  setOfferField(base, "price", patch.fields?.price);
+  setOfferField(base, "sqm", patch.fields?.sqm);
+  setOfferField(base, "monthlyRent", patch.fields?.monthlyRent);
+  setOfferField(base, "monthlyUtilities", patch.fields?.monthlyUtilities);
+  setOfferField(base, "monthlyReserve", patch.fields?.monthlyReserve);
   return base;
 }
 
 function createOfferRecord(patch) {
-  return {
-    id: uid(),
-    title: patch.title || "ImmoScout Angebot",
-    url: patch.url,
-    price: Number.isFinite(patch.price) ? patch.price : 0,
-    sqm: Number.isFinite(patch.sqm) ? patch.sqm : 0,
-    monthlyRent: Number.isFinite(patch.monthlyRent) ? patch.monthlyRent : undefined,
-    monthlyUtilities: Number.isFinite(patch.monthlyUtilities) ? patch.monthlyUtilities : undefined,
-    monthlyReserve: Number.isFinite(patch.monthlyReserve) ? patch.monthlyReserve : undefined,
-    description: patch.description,
-    notes: patch.notes,
-    source: patch.source || "immoscout-html",
-    createdAt: Date.now(),
-  };
+  const record = createEmptyOfferRecord();
+  mergeOfferRecord(record, patch);
+  return record;
 }
 
 function upsertOffer(map, patch) {
@@ -549,12 +723,23 @@ function extractOffersFromScriptBlobs(htmlText) {
     offers.push({
       url,
       title: title ? normalizeWhitespace(title) : undefined,
-      price: clampNonNegative(parseGermanNumber(priceRaw)),
-      sqm: clampNonNegative(parseGermanNumber(sqmRaw)),
-      monthlyRent: clampNonNegative(parseGermanNumber(rentRaw)),
-      monthlyUtilities: clampNonNegative(parseGermanNumber(utilitiesRaw)) ?? bestEffortUtilities(decodedSnippet),
-      monthlyReserve: clampNonNegative(parseGermanNumber(reserveRaw)) ?? bestEffortReserve(decodedSnippet),
       source: "immoscout-script",
+      fields: {
+        price: buildFieldCandidate("price", clampNonNegative(parseGermanNumber(priceRaw)), "script"),
+        sqm: buildFieldCandidate("sqm", clampNonNegative(parseGermanNumber(sqmRaw)), "script"),
+        monthlyRent: pickBestFieldCandidate("monthlyRent", [
+          buildFieldCandidate("monthlyRent", clampNonNegative(parseGermanNumber(rentRaw)), "script"),
+          extractRentCandidateFromText(decodedSnippet),
+        ]),
+        monthlyUtilities: pickBestFieldCandidate("monthlyUtilities", [
+          buildFieldCandidate("monthlyUtilities", clampNonNegative(parseGermanNumber(utilitiesRaw)), "script"),
+          extractUtilitiesCandidateFromText(decodedSnippet),
+        ]),
+        monthlyReserve: pickBestFieldCandidate("monthlyReserve", [
+          buildFieldCandidate("monthlyReserve", clampNonNegative(parseGermanNumber(reserveRaw)), "script"),
+          extractReserveCandidateFromText(decodedSnippet),
+        ]),
+      },
     });
   }
 
@@ -599,12 +784,14 @@ function extractOffersFromAnchorContainers(doc) {
     upsertOffer(offersByKey, {
       title,
       url,
-      price: bestEffortPrice(text),
-      sqm: extractSqm(text),
-      monthlyRent: bestEffortRent(text),
-      monthlyUtilities: bestEffortUtilities(text),
-      monthlyReserve: bestEffortReserve(text),
       source: "immoscout-html",
+      fields: {
+        price: extractPriceCandidateFromText(text),
+        sqm: extractSqmCandidateFromText(text),
+        monthlyRent: extractRentCandidateFromText(text),
+        monthlyUtilities: extractUtilitiesCandidateFromText(text),
+        monthlyReserve: extractReserveCandidateFromText(text),
+      },
     });
   }
 
@@ -619,11 +806,11 @@ function parseOffersFromJson(text) {
       id: uid(),
       title: String(o.title || o.name || "Importiertes Angebot"),
       url: o.url ? String(o.url) : undefined,
-      price: Number(o.price),
-      sqm: Number(o.sqm || o.area || o.livingArea),
-      monthlyRent: o.monthlyRent != null ? Number(o.monthlyRent) : undefined,
-      monthlyUtilities: o.monthlyUtilities != null ? Number(o.monthlyUtilities) : undefined,
-      monthlyReserve: o.monthlyReserve != null ? Number(o.monthlyReserve) : undefined,
+      price: coerceGermanNumber(o.price),
+      sqm: coerceGermanNumber(o.sqm ?? o.area ?? o.livingArea),
+      monthlyRent: coerceGermanNumber(o.monthlyRent),
+      monthlyUtilities: coerceGermanNumber(o.monthlyUtilities),
+      monthlyReserve: coerceGermanNumber(o.monthlyReserve),
       description: o.description ? String(o.description) : undefined,
       notes: o.notes ? String(o.notes) : undefined,
       source: o.source ? String(o.source) : "import-json",
@@ -641,6 +828,7 @@ function parseOffersFromHtml(htmlText) {
   const canonicalUrl = doc.querySelector('link[rel="canonical"]')?.getAttribute("href") || "";
   if (canonicalUrl.includes("/expose/")) {
     const pageText = normalizeWhitespace(doc.body?.textContent || "");
+    const rentBreakdownText = findExposeRentBreakdownText(doc);
     const title =
       normalizeWhitespace(doc.querySelector('meta[property="og:title"]')?.getAttribute("content") || "") ||
       normalizeWhitespace(doc.title || "") ||
@@ -660,41 +848,56 @@ function parseOffersFromHtml(htmlText) {
       htmlText.match(/purchasePrice\s*:\s*["']?(\d[\d.,]*)["']?/i) ||
       htmlText.match(/propertyPrice\s*:\s*["']?(\d[\d.,]*)["']?/i) ||
       htmlText.match(/"price"\s*:\s*["']?(\d[\d.,]*)["']?/i);
-    const priceFromScript = purchasePriceMatch ? clampNonNegative(parseGermanNumber(purchasePriceMatch[1])) : undefined;
-    const price = Number.isFinite(priceFromScript) && priceFromScript > 0 ? priceFromScript : bestEffortPrice(pageText);
+    const priceCandidate = pickBestFieldCandidate("price", [
+      buildFieldCandidate("price", purchasePriceMatch ? clampNonNegative(parseGermanNumber(purchasePriceMatch[1])) : undefined, "script"),
+      extractPriceCandidateFromText(pageText),
+    ]);
 
     const sqmMatch =
       htmlText.match(/"squareMeters"\s*:\s*(\d+(?:[.,]\d+)?)/i) ||
       htmlText.match(/obj_livingSpace"\s*:\s*"(\d+(?:[.,]\d+)?)"/i) ||
       htmlText.match(/"livingSpace"\s*:\s*"(\d+(?:[.,]\d+)?)"/i);
-    const sqmFromScript = sqmMatch ? clampNonNegative(parseGermanNumber(sqmMatch[1])) : undefined;
-    const sqm = Number.isFinite(sqmFromScript) && sqmFromScript > 0 ? sqmFromScript : extractSqm(pageText);
+    const sqmCandidate = pickBestFieldCandidate("sqm", [
+      buildFieldCandidate("sqm", sqmMatch ? clampNonNegative(parseGermanNumber(sqmMatch[1])) : undefined, "script"),
+      extractSqmCandidateFromText(pageText),
+    ]);
 
     const rentMatch =
       htmlText.match(/baseRent\s*:\s*["']?(\d[\d.,]*)["']?/i) ||
       htmlText.match(/totalRent\s*:\s*["']?(\d[\d.,]*)["']?/i);
-    const rentFromScript = rentMatch ? clampNonNegative(parseGermanNumber(rentMatch[1])) : undefined;
-    const monthlyRent = Number.isFinite(rentFromScript) && rentFromScript > 0 ? rentFromScript : undefined;
+    const monthlyRentCandidate = pickBestFieldCandidate("monthlyRent", [
+      extractExposeRentCandidateFromBreakdown(rentBreakdownText),
+      buildFieldCandidate("monthlyRent", rentMatch ? clampNonNegative(parseGermanNumber(rentMatch[1])) : undefined, "script"),
+      extractRentCandidateFromText(pageText),
+    ]);
 
     const hausgeldText = normalizeWhitespace(doc.querySelector(".is24qa-hausgeld")?.textContent || "");
-    const monthlyUtilities = extractEuroAmount(hausgeldText);
+    const monthlyUtilitiesCandidate = pickBestFieldCandidate("monthlyUtilities", [
+      extractExposeUtilitiesCandidateFromBreakdown(rentBreakdownText),
+      buildFieldCandidate("monthlyUtilities", extractEuroAmount(hausgeldText), "script"),
+      extractUtilitiesCandidateFromText(pageText),
+    ]);
+    const monthlyReserveCandidate = pickBestFieldCandidate("monthlyReserve", [
+      extractExposeReserveCandidateFromBreakdown(rentBreakdownText),
+      extractReserveCandidateFromText(pageText),
+    ]);
 
-    if (Number.isFinite(price) && price > 0 && Number.isFinite(sqm) && sqm > 0) {
-      return [
-        {
-          id: uid(),
-          title,
-          url: canonicalUrl,
-          price,
-          sqm,
-          monthlyRent,
-          monthlyUtilities,
-          monthlyReserve: undefined,
-          description,
-          source: "immoscout-expose-html",
-          createdAt: Date.now(),
-        },
-      ];
+    const exposeOffer = createOfferRecord({
+      title,
+      url: canonicalUrl,
+      description,
+      source: "immoscout-expose-html",
+      fields: {
+        price: priceCandidate,
+        sqm: sqmCandidate,
+        monthlyRent: monthlyRentCandidate,
+        monthlyUtilities: monthlyUtilitiesCandidate,
+        monthlyReserve: monthlyReserveCandidate,
+      },
+    });
+
+    if (Number.isFinite(exposeOffer.price) && exposeOffer.price > 0 && Number.isFinite(exposeOffer.sqm) && exposeOffer.sqm > 0) {
+      return [exposeOffer];
     }
     // If we can't extract enough, continue with generic parsing below.
   }
@@ -742,19 +945,27 @@ function parseOffersFromHtml(htmlText) {
           upsertOffer(offersByKey, {
             title: typeof n.item?.name === "string" ? n.item.name : undefined,
             url: typeof n.item?.url === "string" ? n.item.url : undefined,
-            price:
-              typeof n.item?.offers?.price === "number"
-                ? n.item.offers.price
-                : typeof n.item?.offers?.price === "string"
-                  ? Number(n.item.offers.price)
-                  : undefined,
-            sqm:
-              typeof n.item?.floorSize?.value === "number"
-                ? n.item.floorSize.value
-                : typeof n.item?.floorSize?.value === "string"
-                  ? Number(n.item.floorSize.value)
-                  : undefined,
             source: "jsonld",
+            fields: {
+              price: buildFieldCandidate(
+                "price",
+                typeof n.item?.offers?.price === "number"
+                  ? n.item.offers.price
+                  : typeof n.item?.offers?.price === "string"
+                    ? coerceGermanNumber(n.item.offers.price)
+                    : undefined,
+                "jsonld"
+              ),
+              sqm: buildFieldCandidate(
+                "sqm",
+                typeof n.item?.floorSize?.value === "number"
+                  ? n.item.floorSize.value
+                  : typeof n.item?.floorSize?.value === "string"
+                    ? coerceGermanNumber(n.item.floorSize.value)
+                    : undefined,
+                "jsonld"
+              ),
+            },
           });
         }
 
@@ -763,10 +974,22 @@ function parseOffersFromHtml(htmlText) {
             upsertOffer(offersByKey, {
               title: entry?.title || entry?.name,
               url: entry?.url || entry?.targetUrl,
-              price: clampNonNegative(parseGermanNumber(entry?.price?.value || entry?.price)),
-              sqm: clampNonNegative(parseGermanNumber(entry?.livingSpace || entry?.squareMeters)),
-              monthlyRent: clampNonNegative(parseGermanNumber(entry?.baseRent || entry?.rent)),
               source: "jsonld",
+              fields: {
+                price: buildFieldCandidate("price", clampNonNegative(parseGermanNumber(entry?.price?.value || entry?.price)), "jsonld"),
+                sqm: buildFieldCandidate("sqm", clampNonNegative(parseGermanNumber(entry?.livingSpace || entry?.squareMeters)), "jsonld"),
+                monthlyRent: buildFieldCandidate("monthlyRent", clampNonNegative(parseGermanNumber(entry?.baseRent || entry?.rent)), "jsonld"),
+                monthlyUtilities: buildFieldCandidate(
+                  "monthlyUtilities",
+                  clampNonNegative(parseGermanNumber(entry?.serviceCharge || entry?.additionalCosts || entry?.hausgeld)),
+                  "jsonld"
+                ),
+                monthlyReserve: buildFieldCandidate(
+                  "monthlyReserve",
+                  clampNonNegative(parseGermanNumber(entry?.reserve || entry?.maintenanceReserve)),
+                  "jsonld"
+                ),
+              },
             });
           }
         }
@@ -778,21 +1001,23 @@ function parseOffersFromHtml(htmlText) {
           typeof n?.offers?.price === "number"
             ? n.offers.price
             : typeof n?.offers?.price === "string"
-              ? Number(n.offers.price)
+              ? coerceGermanNumber(n.offers.price)
               : undefined;
         const sqm =
           typeof n?.floorSize?.value === "number"
             ? n.floorSize.value
             : typeof n?.floorSize?.value === "string"
-              ? Number(n.floorSize.value)
+              ? coerceGermanNumber(n.floorSize.value)
               : undefined;
         if (url && title && (Number.isFinite(price) || Number.isFinite(sqm))) {
           upsertOffer(offersByKey, {
             title: normalizeWhitespace(title),
             url,
             source: "jsonld",
-            price,
-            sqm,
+            fields: {
+              price: buildFieldCandidate("price", price, "jsonld"),
+              sqm: buildFieldCandidate("sqm", sqm, "jsonld"),
+            },
           });
         }
         }
@@ -918,61 +1143,201 @@ function parseImportText(text) {
   // Offer dialog
   const dialog = $("offerDialog");
   const offerForm = $("offerForm");
+  const dialogFields = {
+    price: $("offerPrice"),
+    sqm: $("offerSqm"),
+    monthlyRent: $("offerMonthlyRent"),
+    monthlyUtilities: $("offerMonthlyUtilities"),
+    monthlyReserve: $("offerMonthlyReserve"),
+  };
+  let dialogState = {
+    mode: "manual-add",
+    source: "manual",
+    createdAt: Date.now(),
+    missingFields: [],
+  };
+  let parsedReviewQueue = [];
+  let parsedReviewAccepted = [];
 
-  function openOfferDialog(existing) {
-    $("dialogTitle").textContent = existing ? "Angebot bearbeiten" : "Angebot hinzufügen";
+  function getMissingMetricKeys(offer) {
+    const missing = [];
+    if (!Number.isFinite(offer?.price)) missing.push("price");
+    if (!Number.isFinite(offer?.sqm)) missing.push("sqm");
+    if (!Number.isFinite(offer?.monthlyRent)) missing.push("monthlyRent");
+    if (!Number.isFinite(offer?.monthlyUtilities)) missing.push("monthlyUtilities");
+    if (!Number.isFinite(offer?.monthlyReserve)) missing.push("monthlyReserve");
+    return missing;
+  }
+
+  function setDialogMissingFields(missingFields) {
+    for (const [fieldKey, input] of Object.entries(dialogFields)) {
+      input.closest(".field")?.classList.toggle("field-missing", missingFields.includes(fieldKey));
+    }
+  }
+
+  function setDialogNumericFieldValidity(input) {
+    const raw = input.value.trim();
+    const isValid = !raw || Number.isFinite(coerceGermanNumber(raw));
+    input.setCustomValidity(isValid ? "" : "Bitte Zahl im deutschen Format eingeben, z. B. 32,5 oder 390,00.");
+    return isValid;
+  }
+
+  function validateOfferDialogFields() {
+    for (const input of Object.values(dialogFields)) {
+      setDialogNumericFieldValidity(input);
+    }
+    return offerForm.reportValidity();
+  }
+
+  for (const input of Object.values(dialogFields)) {
+    input.addEventListener("input", () => {
+      setDialogNumericFieldValidity(input);
+    });
+  }
+
+  function resetDialogState() {
+    dialogState = {
+      mode: "manual-add",
+      source: "manual",
+      createdAt: Date.now(),
+      missingFields: [],
+    };
+    $("dialogHint").classList.add("hidden");
+    $("dialogHint").textContent = "";
+    $("btnSaveOffer").textContent = "Speichern";
+    $("offerPrice").required = true;
+    $("offerSqm").required = true;
+    setDialogMissingFields([]);
+  }
+
+  function buildOfferFromForm() {
+    const monthlyRentRaw = $("offerMonthlyRent").value.trim();
+    const monthlyUtilitiesRaw = $("offerMonthlyUtilities").value.trim();
+    const monthlyReserveRaw = $("offerMonthlyReserve").value.trim();
+    const priceRaw = $("offerPrice").value.trim();
+    const sqmRaw = $("offerSqm").value.trim();
+
+    return {
+      id: $("offerId").value || uid(),
+      title: $("offerTitle").value.trim(),
+      url: $("offerUrl").value.trim() || undefined,
+      price: priceRaw ? coerceGermanNumber(priceRaw) : undefined,
+      sqm: sqmRaw ? coerceGermanNumber(sqmRaw) : undefined,
+      monthlyRent: monthlyRentRaw ? coerceGermanNumber(monthlyRentRaw) : undefined,
+      monthlyUtilities: monthlyUtilitiesRaw ? coerceGermanNumber(monthlyUtilitiesRaw) : undefined,
+      monthlyReserve: monthlyReserveRaw ? coerceGermanNumber(monthlyReserveRaw) : undefined,
+      notes: $("offerNotes").value.trim() || undefined,
+      source: dialogState.source || "manual",
+      createdAt: dialogState.createdAt || Date.now(),
+    };
+  }
+
+  function finishParsedOfferImport() {
+    if (parsedReviewAccepted.length) {
+      offers = [...parsedReviewAccepted, ...offers];
+      saveJson(STORAGE_KEYS.offers, offers);
+    }
+    parsedReviewAccepted = [];
+    parsedReviewQueue = [];
+    parsedOffers = [];
+    importNoticeBase = "";
+    lastFetchBlockedReason = "";
+    lastFetchMode = "";
+    renderImportResults();
+    $("importUrl").value = "";
+    $("importTextarea").value = "";
+    setFetchStatus("");
+    renderOffers();
+    setTab("offers");
+  }
+
+  function advanceParsedOfferReview() {
+    if (!parsedReviewQueue.length) {
+      finishParsedOfferImport();
+      return;
+    }
+    const nextOffer = parsedReviewQueue.shift();
+    openOfferDialog(nextOffer, {
+      mode: "review",
+      missingFields: getMissingMetricKeys(nextOffer),
+      source: nextOffer?.source || "immoscout-html",
+      createdAt: nextOffer?.createdAt || Date.now(),
+    });
+  }
+
+  function openOfferDialog(existing, options = {}) {
+    dialogState = {
+      mode: options.mode || (existing ? "edit" : "manual-add"),
+      source: options.source || existing?.source || "manual",
+      createdAt: options.createdAt || existing?.createdAt || Date.now(),
+      missingFields: [...(options.missingFields || [])],
+    };
+    $("dialogTitle").textContent =
+      dialogState.mode === "review" ? "Angebot prüfen" : existing ? "Angebot bearbeiten" : "Angebot hinzufügen";
     $("offerId").value = existing?.id || "";
     $("offerTitle").value = existing?.title || "";
     $("offerUrl").value = existing?.url || "";
-    $("offerPrice").value = existing?.price != null ? String(existing.price) : "";
-    $("offerSqm").value = existing?.sqm != null ? String(existing.sqm) : "";
-    $("offerMonthlyRent").value = existing?.monthlyRent != null ? String(existing.monthlyRent) : "";
-    $("offerMonthlyUtilities").value = existing?.monthlyUtilities != null ? String(existing.monthlyUtilities) : "";
-    $("offerMonthlyReserve").value = existing?.monthlyReserve != null ? String(existing.monthlyReserve) : "";
+    $("offerPrice").value = formatFormNumber(existing?.price, 2);
+    $("offerSqm").value = formatFormNumber(existing?.sqm, 2);
+    $("offerMonthlyRent").value = formatFormNumber(existing?.monthlyRent, 2);
+    $("offerMonthlyUtilities").value = formatFormNumber(existing?.monthlyUtilities, 2);
+    $("offerMonthlyReserve").value = formatFormNumber(existing?.monthlyReserve, 2);
     $("offerNotes").value = existing?.notes || "";
-    $("btnDeleteOffer").classList.toggle("hidden", !existing);
+    $("btnDeleteOffer").classList.toggle("hidden", !(existing && dialogState.mode === "edit"));
+    $("dialogHint").classList.toggle("hidden", dialogState.mode !== "review");
+    $("dialogHint").textContent =
+      dialogState.mode === "review"
+        ? "Fehlende Angaben bitte ergänzen. Abbrechen oder Schließen überspringt dieses Angebot. Monatliche Werte immer pro Monat eingeben."
+        : "";
+    $("btnSaveOffer").textContent = dialogState.mode === "review" ? "Übernehmen" : "Speichern";
+    $("offerPrice").required = dialogState.mode === "manual-add";
+    $("offerSqm").required = dialogState.mode === "manual-add";
+    setDialogMissingFields(dialogState.missingFields);
+    validateOfferDialogFields();
     dialog.showModal();
   }
 
   $("btnAddOffer").addEventListener("click", () => openOfferDialog());
 
   offerForm.addEventListener("submit", (e) => {
+    const submitterValue = e.submitter?.value || "";
+    if (submitterValue === "cancel") return;
+
     e.preventDefault();
-    const id = $("offerId").value || uid();
-    const title = $("offerTitle").value.trim();
-    const url = $("offerUrl").value.trim() || undefined;
-    const price = Number($("offerPrice").value);
-    const sqm = Number($("offerSqm").value);
-    const monthlyRentRaw = $("offerMonthlyRent").value.trim();
-    const monthlyRent = monthlyRentRaw ? Number(monthlyRentRaw) : undefined;
-    const monthlyUtilitiesRaw = $("offerMonthlyUtilities").value.trim();
-    const monthlyUtilities = monthlyUtilitiesRaw ? Number(monthlyUtilitiesRaw) : undefined;
-    const monthlyReserveRaw = $("offerMonthlyReserve").value.trim();
-    const monthlyReserve = monthlyReserveRaw ? Number(monthlyReserveRaw) : undefined;
-    const notes = $("offerNotes").value.trim() || undefined;
+    if (!validateOfferDialogFields()) return;
+    const payload = buildOfferFromForm();
+    const requiresCoreFields = dialogState.mode === "manual-add";
 
-    if (!title || !Number.isFinite(price) || !Number.isFinite(sqm)) return;
+    if (!payload.title) return;
+    if (requiresCoreFields && (!Number.isFinite(payload.price) || !Number.isFinite(payload.sqm))) return;
 
-    const idx = offers.findIndex((o) => o.id === id);
-    const payload = {
-      id,
-      title,
-      url,
-      price,
-      sqm,
-      monthlyRent,
-      monthlyUtilities,
-      monthlyReserve,
-      notes,
-      source: idx >= 0 ? offers[idx].source : "manual",
-      createdAt: idx >= 0 ? offers[idx].createdAt : Date.now(),
-    };
-    if (idx >= 0) offers[idx] = payload;
-    else offers.unshift(payload);
+    if (dialogState.mode === "review") {
+      parsedReviewAccepted.push(payload);
+    } else {
+      const idx = offers.findIndex((o) => o.id === payload.id);
+      if (idx >= 0) {
+        payload.source = offers[idx].source;
+        payload.createdAt = offers[idx].createdAt;
+        offers[idx] = payload;
+      } else {
+        offers.unshift(payload);
+      }
+      saveJson(STORAGE_KEYS.offers, offers);
+      renderOffers();
+    }
 
-    saveJson(STORAGE_KEYS.offers, offers);
-    dialog.close();
-    renderOffers();
+    dialog.close("save");
+  });
+
+  dialog.addEventListener("close", () => {
+    const mode = dialogState.mode;
+    const returnValue = dialog.returnValue;
+    resetDialogState();
+    if (mode === "review") {
+      advanceParsedOfferReview();
+      return;
+    }
+    if (returnValue === "save") renderOffers();
   });
 
   $("btnDeleteOffer").addEventListener("click", () => {
@@ -1046,6 +1411,7 @@ function parseImportText(text) {
   let lastImportSource = "manual";
   let importNoticeBase = "";
   let lastFetchBlockedReason = "";
+  let lastFetchMode = "";
 
   function setFetchStatus(message, kind = "muted") {
     const el = $("fetchStatus");
@@ -1076,13 +1442,15 @@ function parseImportText(text) {
       hint.textContent =
         lastImportSource === "url"
           ? lastFetchBlockedReason
-            ? "Kein verwertbares Expose gefunden. Der Abruf wurde wahrscheinlich durch Login- oder Schutzmechanismen abgefangen. Hinterlege optional den Cookie in den Einstellungen und versuche es erneut."
-            : "Keine Angebote gefunden. Falls ImmoScout nur eine Login- oder Schutzseite geliefert hat, hinterlege optional den Cookie in den Einstellungen und versuche es erneut."
+            ? "Kein verwertbares Expose gefunden. Der Abruf wurde wahrscheinlich durch Login- oder Schutzmechanismen abgefangen. Hinterlege optional den Cookie in den Einstellungen oder nutze den Playwright-Fallback."
+            : "Keine Angebote gefunden. Falls ImmoScout nur eine Login- oder Schutzseite geliefert hat, hinterlege optional den Cookie in den Einstellungen oder aktiviere den Playwright-Fallback über den lokalen Server."
           : "Keine Angebote gefunden. Falls die Seite stark per JavaScript gerendert wird, nutze alternativ den HTML-Fallback oder pruefe, ob die URL direkt zum Expose bzw. zur Suchseite fuehrt.";
     } else {
       hint.textContent =
         lastImportSource === "url"
-          ? "URL erfolgreich gelesen. Prüfe die Daten kurz und füge dann nur die gewünschten Angebote hinzu."
+          ? lastFetchMode === "playwright"
+            ? "URL erfolgreich ueber Playwright gelesen. Prüfe die Daten kurz und füge dann nur die gewünschten Angebote hinzu."
+            : "URL erfolgreich gelesen. Prüfe die Daten kurz und füge dann nur die gewünschten Angebote hinzu."
           : "Analyse abgeschlossen. Prüfe die Daten kurz und füge dann die gewünschten Angebote hinzu.";
     }
     grid.innerHTML = parsedOffers.map((o) => renderCard(o, settings, { compact: true })).join("");
@@ -1093,6 +1461,7 @@ function parseImportText(text) {
     const text = $("importTextarea").value || "";
     lastImportSource = "manual";
     lastFetchBlockedReason = "";
+    lastFetchMode = "";
     parsedOffers = parseImportText(text);
     renderImportResults();
   });
@@ -1121,23 +1490,28 @@ function parseImportText(text) {
       if (!response.ok || !payload.ok) {
         importNoticeBase = payload?.hint || "";
         lastFetchBlockedReason = payload?.blockedReason || "";
+        lastFetchMode = payload?.fetchMode || "";
         const statusInfo = payload?.status ? ` (HTTP ${payload.status})` : "";
         const message =
           payload?.status === 401 || payload?.status === 403
             ? "ImmoScout verweigert den Abruf"
             : payload?.blockedReason
               ? "ImmoScout hat nur eine Login- oder Schutzseite geliefert"
+            : payload?.playwrightError
+              ? `Playwright-Fallback fehlgeschlagen: ${payload.playwrightError}`
             : payload?.error || "Abruf fehlgeschlagen.";
         throw new Error(`${message}${statusInfo}`);
       }
 
       $("importTextarea").value = payload.html || "";
       lastImportSource = "url";
-      importNoticeBase = "";
+      importNoticeBase = payload.fetchMode === "playwright" ? payload.hint || "" : "";
       lastFetchBlockedReason = "";
+      lastFetchMode = payload.fetchMode || "http";
       parsedOffers = parseImportText(payload.html || "");
       renderImportResults();
-      setFetchStatus(`URL geladen${payload.status ? ` (HTTP ${payload.status})` : ""}.`, "success");
+      const modeLabel = payload.fetchMode === "playwright" ? " ueber Playwright" : "";
+      setFetchStatus(`URL${modeLabel} geladen${payload.status ? ` (HTTP ${payload.status})` : ""}.`, "success");
     } catch (error) {
       parsedOffers = [];
       lastImportSource = "url";
@@ -1159,6 +1533,7 @@ function parseImportText(text) {
       lastImportSource = "file";
       importNoticeBase = "";
       lastFetchBlockedReason = "";
+      lastFetchMode = "";
       parsedOffers = parseImportText(text);
       renderImportResults();
     };
@@ -1167,19 +1542,20 @@ function parseImportText(text) {
 
   $("btnAddParsed").addEventListener("click", () => {
     if (!parsedOffers.length) return;
-    const existingUrls = new Set(offers.map((o) => o.url).filter(Boolean));
-    const toAdd = parsedOffers.filter((o) => !o.url || !existingUrls.has(o.url));
-    offers = [...toAdd, ...offers];
-    saveJson(STORAGE_KEYS.offers, offers);
-    parsedOffers = [];
-    importNoticeBase = "";
-    lastFetchBlockedReason = "";
-    renderImportResults();
-    $("importUrl").value = "";
-    $("importTextarea").value = "";
-    setFetchStatus("");
-    renderOffers();
-    setTab("offers");
+    const seenUrls = new Set(offers.map((o) => o.url).filter(Boolean));
+    const uniqueParsedOffers = parsedOffers.filter((offer) => {
+      if (!offer.url) return true;
+      if (seenUrls.has(offer.url)) return false;
+      seenUrls.add(offer.url);
+      return true;
+    });
+    parsedReviewAccepted = uniqueParsedOffers.filter((offer) => getMissingMetricKeys(offer).length === 0);
+    parsedReviewQueue = uniqueParsedOffers.filter((offer) => getMissingMetricKeys(offer).length > 0);
+    if (!parsedReviewQueue.length) {
+      finishParsedOfferImport();
+      return;
+    }
+    advanceParsedOfferReview();
   });
 
   // Export/reset

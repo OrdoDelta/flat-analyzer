@@ -2,7 +2,10 @@
 
 import json
 import mimetypes
+import os
 import pathlib
+import shutil
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,6 +17,7 @@ HOST = "127.0.0.1"
 PORT = 8000
 ROOT = pathlib.Path(__file__).resolve().parent
 ALLOWED_HOSTS = {"immobilienscout24.de", "www.immobilienscout24.de"}
+PLAYWRIGHT_SCRIPT = ROOT / "playwright_fetch.js"
 
 
 def normalize_cookie(raw_cookie):
@@ -75,6 +79,120 @@ def detect_blocked_page(url, status, html):
     return {"blocked": False, "reason": None, "hint": None}
 
 
+def fetch_via_http(url, cookie):
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Encoding": "identity",
+            "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Referer": "https://www.immobilienscout24.de/",
+            "Origin": "https://www.immobilienscout24.de",
+            "Upgrade-Insecure-Requests": "1",
+        },
+    )
+    if cookie:
+        request.add_header("Cookie", cookie)
+
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = response.read()
+            content_type = response.headers.get("Content-Type", "text/html")
+            charset = response.headers.get_content_charset() or "utf-8"
+            html = body.decode(charset, errors="replace")
+            block_result = detect_blocked_page(response.geturl(), response.status, html)
+            return {
+                "ok": not block_result["blocked"],
+                "status": response.status,
+                "finalUrl": response.geturl(),
+                "contentType": content_type,
+                "html": html,
+                "error": "Blocked page returned instead of listing data." if block_result["blocked"] else None,
+                "hint": block_result["hint"],
+                "blockedReason": block_result["reason"],
+                "fetchMode": "http",
+            }
+    except urllib.error.HTTPError as exc:
+        body = exc.read()
+        content_type = exc.headers.get("Content-Type", "text/html")
+        charset = exc.headers.get_content_charset() or "utf-8"
+        html = body.decode(charset, errors="replace")
+        block_result = detect_blocked_page(exc.geturl(), exc.code, html)
+        return {
+            "ok": False,
+            "status": exc.code,
+            "finalUrl": exc.geturl(),
+            "contentType": content_type,
+            "html": html,
+            "error": f"HTTP {exc.code}",
+            "hint": block_result["hint"],
+            "blockedReason": block_result["reason"],
+            "fetchMode": "http",
+        }
+
+
+def run_playwright_fetch(url):
+    node_bin = os.environ.get("NODE_BIN") or shutil.which("node")
+    if not node_bin:
+        return {
+            "ok": False,
+            "error": "Playwright fallback unavailable because `node` is not installed.",
+            "fetchMode": "playwright",
+            "hint": "Install Node.js and run `npm install` in the project folder to enable browser-based URL import.",
+        }
+
+    if not PLAYWRIGHT_SCRIPT.exists():
+        return {
+            "ok": False,
+            "error": "Playwright fallback script is missing.",
+            "fetchMode": "playwright",
+        }
+
+    try:
+        completed = subprocess.run(
+            [node_bin, str(PLAYWRIGHT_SCRIPT), url],
+            cwd=str(ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"Playwright fallback could not be started: {exc}",
+            "fetchMode": "playwright",
+        }
+
+    stdout = (completed.stdout or "").strip()
+    last_line = stdout.splitlines()[-1] if stdout else ""
+    try:
+        payload = json.loads(last_line) if last_line else {}
+    except json.JSONDecodeError:
+        payload = {}
+
+    stderr = (completed.stderr or "").strip()
+    if stderr and not payload.get("details"):
+        payload["details"] = stderr
+
+    if not payload:
+        payload = {
+            "ok": False,
+            "error": "Playwright fallback returned no usable output.",
+            "fetchMode": "playwright",
+            "details": stderr or stdout,
+        }
+
+    payload.setdefault("fetchMode", "playwright")
+    return payload
+
+
 class AppHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -115,72 +233,35 @@ class AppHandler(SimpleHTTPRequestHandler):
             )
             return
 
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Encoding": "identity",
-                "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-                "Referer": "https://www.immobilienscout24.de/",
-                "Origin": "https://www.immobilienscout24.de",
-                "Upgrade-Insecure-Requests": "1",
-            },
-        )
-        if cookie:
-            request.add_header("Cookie", cookie)
-
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                body = response.read()
-                content_type = response.headers.get("Content-Type", "text/html")
-                charset = response.headers.get_content_charset() or "utf-8"
-                html = body.decode(charset, errors="replace")
-                block_result = detect_blocked_page(response.geturl(), response.status, html)
-                self._send_json(
-                    HTTPStatus.OK,
-                    {
-                        "ok": not block_result["blocked"],
-                        "status": response.status,
-                        "finalUrl": response.geturl(),
-                        "contentType": content_type,
-                        "html": html,
-                        "error": "Blocked page returned instead of listing data." if block_result["blocked"] else None,
-                        "hint": block_result["hint"],
-                        "blockedReason": block_result["reason"],
-                    },
-                )
-                return
-        except urllib.error.HTTPError as exc:
-            body = exc.read()
-            content_type = exc.headers.get("Content-Type", "text/html")
-            charset = exc.headers.get_content_charset() or "utf-8"
-            html = body.decode(charset, errors="replace")
-            block_result = detect_blocked_page(exc.geturl(), exc.code, html)
-            self._send_json(
-                HTTPStatus.OK,
-                {
-                    "ok": False,
-                    "status": exc.code,
-                    "finalUrl": exc.geturl(),
-                    "contentType": content_type,
-                    "html": html,
-                    "error": f"HTTP {exc.code}",
-                    "hint": block_result["hint"],
-                    "blockedReason": block_result["reason"],
-                },
-            )
-            return
+            http_result = fetch_via_http(url, cookie)
         except Exception as exc:
             self._send_json(
                 HTTPStatus.BAD_GATEWAY,
                 {"ok": False, "error": f"Fetch failed: {exc}"},
             )
+            return
+
+        if http_result.get("ok"):
+            self._send_json(HTTPStatus.OK, http_result)
+            return
+
+        should_try_playwright = http_result.get("status") in {401, 403} or bool(http_result.get("blockedReason"))
+        if should_try_playwright:
+            playwright_result = run_playwright_fetch(url)
+            if playwright_result.get("ok"):
+                merged_hint = playwright_result.get("hint") or http_result.get("hint")
+                playwright_result["hint"] = merged_hint
+                self._send_json(HTTPStatus.OK, playwright_result)
+                return
+
+            fallback_hint = playwright_result.get("hint") or http_result.get("hint")
+            http_result["hint"] = fallback_hint
+            http_result["playwrightError"] = playwright_result.get("error")
+            http_result["playwrightDetails"] = playwright_result.get("details")
+            http_result["playwrightAvailable"] = False if "not installed" in str(playwright_result.get("error", "")).lower() else True
+
+        self._send_json(HTTPStatus.OK, http_result)
 
     def guess_type(self, path):
         if str(path).endswith(".js"):

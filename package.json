@@ -1,0 +1,12 @@
+{
+  "name": "flat-analyzer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local flat analyzer with ImmoScout URL import fallback via Playwright",
+  "scripts": {
+    "playwright:fetch": "node playwright_fetch.js"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}

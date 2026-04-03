@@ -7,22 +7,48 @@ Simple local web app to score flat offers with a traffic-light result:
 - **Red**: no go (outside yellow thresholds)
 - **Gray**: incomplete (missing key data)
 
+## Collaboration
+
+For multi-thread Codex work on this repo, use the workflow in `COLLABORATION.md`.
+
+Recommended structure:
+
+- one main integration thread
+- one parsing thread for `app.js`
+- one UI thread for `index.html` and `styles.css`
+- one tooling/docs thread for `server.py`, `start.command`, and `README.md`
+
 ## Run locally
 
-Open `index.html` in your browser.
+Preferred start:
 
-Tip: if you use VS Code, you can install an extension like “Live Server” and run it from VS Code (no terminal needed).
+1. Install Python 3
+2. Install Node.js (required for the Playwright fallback)
+3. In the project folder run `npm install`
+4. Start the app with `start.command`
+
+Fallback start from terminal:
+
+- `python3 server.py`
+
+The app runs at `http://127.0.0.1:8000`.
 
 ## Import (MVP)
 
-Because direct scanning of ImmoScout URLs usually runs into **login/CORS/bot protection**, the MVP import is:
+The import tab supports three paths:
 
-1. Open your saved ImmoScout search results page in the browser
-2. View page source (often `Ctrl/Cmd+U`)
-3. Copy the HTML
-4. Paste it into the **Import** tab and click **Parse**
+1. Paste an ImmoScout URL and let the local server fetch it
+2. If ImmoScout blocks the plain HTTP fetch, the server can retry via Playwright using a locally saved browser session
+3. Paste raw HTML manually if you want a fallback without URL fetching
 
 You can also paste JSON exported by this app.
+
+### Playwright fallback
+
+- The first blocked ImmoScout request may open a Chromium window
+- If login is required, sign in once there
+- The browser profile is saved locally in `.playwright-profile/`, so later imports can reuse the session
+- If Playwright is not installed, URL import still works for pages that the plain HTTP fetch can access
 
 ## Metrics
 
@@ -35,7 +61,6 @@ You can also paste JSON exported by this app.
 
 ## Next steps (when you’re ready)
 
-- Add an automated “scan URL” importer using a local backend + browser automation (Playwright), reusing your logged-in session.
 - Add more criteria (district, commute time, floor, energy class) as soft-scoring.
 - Add multi-user + hosting (still works as a small web app).
 
