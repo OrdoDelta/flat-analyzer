@@ -18,6 +18,19 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v node >/dev/null 2>&1; then
+  echo "Note: node was not found."
+  echo "The app will still start, but ImmoScout connection via Playwright will stay unavailable."
+  echo "Install Node.js, then run: npm install && npm run playwright:install"
+  echo
+elif [ ! -d "$SCRIPT_DIR/node_modules/playwright" ]; then
+  echo "Note: Playwright dependencies are not installed yet."
+  echo "Run this once in the project folder before testing ImmoScout connection:"
+  echo "  npm install"
+  echo "  npm run playwright:install"
+  echo
+fi
+
 python3 - <<'PY'
 import socket
 sock = socket.socket()

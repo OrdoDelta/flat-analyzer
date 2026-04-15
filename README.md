@@ -18,37 +18,62 @@ Recommended structure:
 - one UI thread for `index.html` and `styles.css`
 - one tooling/docs thread for `server.py`, `start.command`, and `README.md`
 
-## Run locally
+## Recommended next step: local validation
 
-Preferred start:
+Before moving to always-on hosting, validate the ImmoScout session flow locally on your Mac:
 
 1. Install Python 3
-2. Install Node.js (required for the Playwright fallback)
+2. Install Node.js
 3. In the project folder run `npm install`
-4. Start the app with `start.command`
+4. Run `npm run playwright:install`
+5. Start with `start.command`
+6. Open the Import tab and use `Mit ImmoScout verbinden`
+7. Complete the login in the browser window that opens on this Mac
+8. Test one exposé URL and one search URL without using the cookie field
+9. Restart the server and verify the session still works
 
-Fallback start from terminal:
+Use `Verbindung zurücksetzen` to remove the stored local Playwright profile and retest the recovery flow.
+
+Fallback from terminal:
 
 - `python3 server.py`
 
-The app runs at `http://127.0.0.1:8000`.
+The local app runs at `http://127.0.0.1:8000`.
+
+## Always-on deployment (later)
+
+Primary deployment target remains a private always-on service once local validation is stable.
+
+- Host the app behind a private URL
+- Keep the Python server running permanently
+- Store the Playwright profile on persistent disk so the ImmoScout session survives restarts
+
+Recommended container path:
+
+```bash
+docker build -t flat-analyzer .
+docker run -p 8000:8000 -v flat-analyzer-data:/data flat-analyzer
+```
+
+Then open `http://<your-host>:8000`.
 
 ## Import (MVP)
 
 The import tab supports three paths:
 
-1. Paste an ImmoScout URL and let the local server fetch it
-2. If ImmoScout blocks the plain HTTP fetch, the server can retry via Playwright using a locally saved browser session
+1. Paste an ImmoScout URL and let the running service fetch it
+2. If ImmoScout blocks the plain HTTP fetch, the server can retry via Playwright using the stored ImmoScout session
 3. Paste raw HTML manually if you want a fallback without URL fetching
 
 You can also paste JSON exported by this app.
 
-### Playwright fallback
+### ImmoScout connection
 
-- The first blocked ImmoScout request may open a Chromium window
-- If login is required, sign in once there
-- The browser profile is saved locally in `.playwright-profile/`, so later imports can reuse the session
-- If Playwright is not installed, URL import still works for pages that the plain HTTP fetch can access
+- Use the `ImmoScout-Verbindung` area in the Import tab to connect once
+- The backend stores the Playwright browser profile and reuses it for later imports
+- If the session expires, the UI should show `Erneut verbinden`
+- `Verbindung zurücksetzen` clears the stored local Playwright profile so you can test reconnect/recovery
+- The cookie field in settings remains only as a fallback/debug option
 
 ## Metrics
 

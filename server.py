@@ -13,11 +13,12 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 
-HOST = "127.0.0.1"
-PORT = 8000
+HOST = os.environ.get("HOST", "127.0.0.1")
+PORT = int(os.environ.get("PORT", "8000"))
 ROOT = pathlib.Path(__file__).resolve().parent
 ALLOWED_HOSTS = {"immobilienscout24.de", "www.immobilienscout24.de"}
 PLAYWRIGHT_SCRIPT = ROOT / "playwright_fetch.js"
+PLAYWRIGHT_PROFILE_DIR = pathlib.Path(os.environ.get("PLAYWRIGHT_PROFILE_DIR", ROOT / ".playwright-profile" / "immoscout"))
 
 
 def normalize_cookie(raw_cookie):
@@ -46,8 +47,8 @@ def detect_blocked_page(url, status, html):
             "blocked": True,
             "reason": "auth",
             "hint": (
-                "ImmoScout24 rejected the request. If the page opens in your browser, "
-                "copy your browser Cookie header into the optional ImmoScout-Cookie field and try again."
+                "ImmoScout24 rejected the request. Verbinde die gespeicherte ImmoScout-Sitzung erneut "
+                "oder nutze den Cookie nur noch als Debug-Fallback."
             ),
         }
 
@@ -72,7 +73,7 @@ def detect_blocked_page(url, status, html):
             "reason": "login-page",
             "hint": (
                 "ImmoScout24 returned a login or protection page instead of listing data. "
-                "Paste your browser Cookie header into the optional ImmoScout-Cookie field and retry."
+                "Starte die ImmoScout-Verbindung erneut, damit die gespeicherte Playwright-Sitzung aktualisiert wird."
             ),
         }
 
@@ -137,14 +138,14 @@ def fetch_via_http(url, cookie):
         }
 
 
-def run_playwright_fetch(url):
+def run_playwright_command(command, *args, timeout=90):
     node_bin = os.environ.get("NODE_BIN") or shutil.which("node")
     if not node_bin:
         return {
             "ok": False,
             "error": "Playwright fallback unavailable because `node` is not installed.",
-            "fetchMode": "playwright",
-            "hint": "Install Node.js and run `npm install` in the project folder to enable browser-based URL import.",
+            "fetchMode": "playwright" if command == "fetch" else None,
+            "hint": "Install Node.js and run `npm install` in the project folder to enable browser-based URL import and ImmoScout session handling.",
         }
 
     if not PLAYWRIGHT_SCRIPT.exists():
@@ -156,18 +157,19 @@ def run_playwright_fetch(url):
 
     try:
         completed = subprocess.run(
-            [node_bin, str(PLAYWRIGHT_SCRIPT), url],
+            [node_bin, str(PLAYWRIGHT_SCRIPT), command, *args],
             cwd=str(ROOT),
             check=False,
             capture_output=True,
             text=True,
-            timeout=90,
+            timeout=timeout,
+            env={**os.environ, "PLAYWRIGHT_PROFILE_DIR": str(PLAYWRIGHT_PROFILE_DIR)},
         )
     except Exception as exc:
         return {
             "ok": False,
-            "error": f"Playwright fallback could not be started: {exc}",
-            "fetchMode": "playwright",
+            "error": f"Playwright command could not be started: {exc}",
+            "fetchMode": "playwright" if command == "fetch" else None,
         }
 
     stdout = (completed.stdout or "").strip()
@@ -184,20 +186,64 @@ def run_playwright_fetch(url):
     if not payload:
         payload = {
             "ok": False,
-            "error": "Playwright fallback returned no usable output.",
-            "fetchMode": "playwright",
+            "error": "Playwright command returned no usable output.",
+            "fetchMode": "playwright" if command == "fetch" else None,
             "details": stderr or stdout,
         }
 
-    payload.setdefault("fetchMode", "playwright")
+    if command == "fetch":
+        payload.setdefault("fetchMode", "playwright")
     return payload
+
+
+def get_auth_status():
+    status = run_playwright_command("status", timeout=45)
+    if status.get("ok"):
+        return status
+    error_text = str(status.get("error", "")).lower()
+    if "not installed" in error_text or "browser runtime" in error_text or "not ready" in error_text:
+        return {
+            "ok": True,
+            "authState": "unavailable",
+            "connected": False,
+            "profileReady": status.get("profileReady", False),
+            "profileDir": status.get("profileDir", str(PLAYWRIGHT_PROFILE_DIR)),
+            "hint": status.get("hint") or status.get("error"),
+            "details": status.get("details"),
+        }
+    return {
+        "ok": False,
+        "error": status.get("error") or "Unable to determine ImmoScout session status.",
+        "details": status.get("details"),
+        "hint": status.get("hint"),
+    }
 
 
 class AppHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
+    def do_GET(self):
+        if self.path == "/api/auth/status":
+            status = get_auth_status()
+            http_status = HTTPStatus.OK if status.get("ok") else HTTPStatus.BAD_GATEWAY
+            self._send_json(http_status, status)
+            return
+        super().do_GET()
+
     def do_POST(self):
+        if self.path == "/api/auth/connect":
+            result = run_playwright_command("connect", timeout=240)
+            http_status = HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_GATEWAY
+            self._send_json(http_status, result)
+            return
+
+        if self.path == "/api/auth/reset":
+            result = run_playwright_command("reset", timeout=30)
+            http_status = HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_GATEWAY
+            self._send_json(http_status, result)
+            return
+
         if self.path != "/api/fetch":
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
             return
@@ -248,10 +294,11 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         should_try_playwright = http_result.get("status") in {401, 403} or bool(http_result.get("blockedReason"))
         if should_try_playwright:
-            playwright_result = run_playwright_fetch(url)
+            playwright_result = run_playwright_command("fetch", url, timeout=120)
             if playwright_result.get("ok"):
                 merged_hint = playwright_result.get("hint") or http_result.get("hint")
                 playwright_result["hint"] = merged_hint
+                playwright_result["authState"] = get_auth_status().get("authState", "connected")
                 self._send_json(HTTPStatus.OK, playwright_result)
                 return
 
@@ -260,6 +307,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             http_result["playwrightError"] = playwright_result.get("error")
             http_result["playwrightDetails"] = playwright_result.get("details")
             http_result["playwrightAvailable"] = False if "not installed" in str(playwright_result.get("error", "")).lower() else True
+            http_result["authState"] = get_auth_status().get("authState", "login_required")
 
         self._send_json(HTTPStatus.OK, http_result)
 

@@ -4,7 +4,11 @@
   "private": true,
   "description": "Local flat analyzer with ImmoScout URL import fallback via Playwright",
   "scripts": {
-    "playwright:fetch": "node playwright_fetch.js"
+    "playwright:fetch": "node playwright_fetch.js fetch",
+    "playwright:status": "node playwright_fetch.js status",
+    "playwright:connect": "node playwright_fetch.js connect",
+    "playwright:reset": "node playwright_fetch.js reset",
+    "playwright:install": "npx playwright install chromium"
   },
   "dependencies": {
     "playwright": "^1.52.0"

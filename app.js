@@ -8,6 +8,9 @@ const THEME_DEFAULT = "light";
 
 const LOCALE = "de-DE";
 const FETCH_ENDPOINT = "/api/fetch";
+const AUTH_STATUS_ENDPOINT = "/api/auth/status";
+const AUTH_CONNECT_ENDPOINT = "/api/auth/connect";
+const AUTH_RESET_ENDPOINT = "/api/auth/reset";
 
 const DEFAULT_SETTINGS = {
   purchaseCostsPct: 10.0,
@@ -1412,6 +1415,7 @@ function parseImportText(text) {
   let importNoticeBase = "";
   let lastFetchBlockedReason = "";
   let lastFetchMode = "";
+  let authConnection = { state: "unknown", hint: "", available: true };
 
   function setFetchStatus(message, kind = "muted") {
     const el = $("fetchStatus");
@@ -1421,12 +1425,150 @@ function parseImportText(text) {
     if (kind === "success") el.classList.add("status-success");
   }
 
+  function setAuthActionStatus(message, kind = "muted") {
+    const el = $("authActionStatus");
+    el.textContent = message || "";
+    el.classList.remove("status-error", "status-success");
+    if (kind === "error") el.classList.add("status-error");
+    if (kind === "success") el.classList.add("status-success");
+  }
+
+  function getAuthPresentation(state) {
+    if (state === "connected") return { label: "Verbunden", className: "status-connected", actionLabel: "Erneut verbinden" };
+    if (state === "reconnect_needed")
+      return { label: "Erneut verbinden", className: "status-reconnect-needed", actionLabel: "Erneut verbinden" };
+    if (state === "login_required")
+      return { label: "Login erforderlich", className: "status-login-required", actionLabel: "Mit ImmoScout verbinden" };
+    if (state === "unavailable")
+      return { label: "Nicht verfügbar", className: "status-unavailable", actionLabel: "Verbindung nicht verfügbar" };
+    return { label: "Unbekannt", className: "", actionLabel: "Mit ImmoScout verbinden" };
+  }
+
+  function renderAuthStatus() {
+    const pill = $("authStatePill");
+    const hint = $("authHint");
+    const connectButton = $("btnConnectAuth");
+    const refreshButton = $("btnRefreshAuth");
+    const resetButton = $("btnResetAuth");
+    const isServiceMode = location.protocol.startsWith("http");
+    const presentation = getAuthPresentation(authConnection.state);
+
+    pill.textContent = presentation.label;
+    pill.className = `pill ${presentation.className}`.trim();
+    connectButton.textContent = presentation.actionLabel;
+    connectButton.disabled = !isServiceMode || authConnection.state === "unavailable";
+    refreshButton.disabled = !isServiceMode;
+    resetButton.disabled = !isServiceMode;
+    hint.textContent = isServiceMode
+      ? authConnection.hint || "Verbinde ImmoScout einmalig ueber Playwright, damit der Dienst die Sitzung speichern kann."
+      : "Import und ImmoScout-Verbindung brauchen den laufenden Dienst ueber HTTP, nicht file://.";
+  }
+
+  async function refreshAuthStatus(options = {}) {
+    if (!location.protocol.startsWith("http")) {
+      authConnection = {
+        state: "unavailable",
+        hint: "ImmoScout-Verbindung ist nur verfuegbar, wenn die App ueber den laufenden Dienst geoeffnet wird.",
+        available: false,
+      };
+      renderAuthStatus();
+      return;
+    }
+
+    if (options.showProgress) setAuthActionStatus("Status wird geprüft...");
+    try {
+      const response = await fetch(AUTH_STATUS_ENDPOINT, { cache: "no-store" });
+      const payload = await response.json();
+      authConnection = {
+        state: payload?.authState || "unknown",
+        hint: payload?.hint || "",
+        available: response.ok && payload?.authState !== "unavailable",
+      };
+      renderAuthStatus();
+      if (options.showProgress) setAuthActionStatus("Status aktualisiert.", "success");
+    } catch (error) {
+      authConnection = {
+        state: "unavailable",
+        hint: "Status konnte nicht geladen werden. Prüfe den Dienst oder die Hosting-Konfiguration.",
+        available: false,
+      };
+      renderAuthStatus();
+      if (options.showProgress) setAuthActionStatus(error instanceof Error ? error.message : "Status fehlgeschlagen.", "error");
+    }
+  }
+
+  async function connectImmoScout() {
+    setAuthActionStatus("Playwright-Login wird gestartet. Browserfenster auf diesem Mac pruefen und dort den Login abschliessen...");
+    $("btnConnectAuth").disabled = true;
+    $("btnRefreshAuth").disabled = true;
+    $("btnResetAuth").disabled = true;
+    try {
+      const response = await fetch(AUTH_CONNECT_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.hint || payload?.error || "ImmoScout-Verbindung fehlgeschlagen.");
+      }
+      authConnection = {
+        state: payload?.authState || "connected",
+        hint: payload?.hint || "",
+        available: true,
+      };
+      renderAuthStatus();
+      setAuthActionStatus("ImmoScout-Verbindung gespeichert.", "success");
+    } catch (error) {
+      setAuthActionStatus(error instanceof Error ? error.message : "ImmoScout-Verbindung fehlgeschlagen.", "error");
+      await refreshAuthStatus();
+      return;
+    }
+    await refreshAuthStatus();
+  }
+
+  async function resetImmoScoutConnection() {
+    const approved = confirm("Gespeicherte ImmoScout-Sitzung lokal entfernen und erneut verbinden?");
+    if (!approved) return;
+
+    setAuthActionStatus("Gespeicherte ImmoScout-Sitzung wird entfernt...");
+    $("btnConnectAuth").disabled = true;
+    $("btnRefreshAuth").disabled = true;
+    $("btnResetAuth").disabled = true;
+    try {
+      const response = await fetch(AUTH_RESET_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.hint || payload?.error || "ImmoScout-Verbindung konnte nicht zurückgesetzt werden.");
+      }
+      authConnection = {
+        state: payload?.authState || "login_required",
+        hint: payload?.hint || "",
+        available: true,
+      };
+      renderAuthStatus();
+      setAuthActionStatus("Gespeicherte ImmoScout-Sitzung wurde entfernt.", "success");
+    } catch (error) {
+      setAuthActionStatus(
+        error instanceof Error ? error.message : "ImmoScout-Verbindung konnte nicht zurückgesetzt werden.",
+        "error",
+      );
+      await refreshAuthStatus();
+      return;
+    }
+    await refreshAuthStatus();
+  }
+
   function updateServerHint() {
     const hint = $("serverHint");
     const isLocalServer = location.protocol.startsWith("http");
     const localHint = isLocalServer
       ? importNoticeBase
-      : "URL-Import braucht den lokalen Server. Starte im Projektordner: python3 server.py und oeffne dann http://127.0.0.1:8000";
+      : "URL-Import braucht den laufenden Dienst. Lokal als Fallback: python3 server.py und dann http://127.0.0.1:8000 oeffnen.";
     hint.classList.toggle("hidden", !localHint);
     hint.textContent = localHint;
     $("btnFetchUrl").disabled = !isLocalServer;
@@ -1442,8 +1584,8 @@ function parseImportText(text) {
       hint.textContent =
         lastImportSource === "url"
           ? lastFetchBlockedReason
-            ? "Kein verwertbares Expose gefunden. Der Abruf wurde wahrscheinlich durch Login- oder Schutzmechanismen abgefangen. Hinterlege optional den Cookie in den Einstellungen oder nutze den Playwright-Fallback."
-            : "Keine Angebote gefunden. Falls ImmoScout nur eine Login- oder Schutzseite geliefert hat, hinterlege optional den Cookie in den Einstellungen oder aktiviere den Playwright-Fallback über den lokalen Server."
+            ? "Kein verwertbares Expose gefunden. Die gespeicherte ImmoScout-Sitzung muss vermutlich erneut verbunden werden."
+            : "Keine Angebote gefunden. Falls ImmoScout nur eine Login- oder Schutzseite geliefert hat, pruefe die ImmoScout-Verbindung oder nutze den Cookie-Fallback nur zu Debug-Zwecken."
           : "Keine Angebote gefunden. Falls die Seite stark per JavaScript gerendert wird, nutze alternativ den HTML-Fallback oder pruefe, ob die URL direkt zum Expose bzw. zur Suchseite fuehrt.";
     } else {
       hint.textContent =
@@ -1464,6 +1606,18 @@ function parseImportText(text) {
     lastFetchMode = "";
     parsedOffers = parseImportText(text);
     renderImportResults();
+  });
+
+  $("btnRefreshAuth").addEventListener("click", () => {
+    refreshAuthStatus({ showProgress: true });
+  });
+
+  $("btnConnectAuth").addEventListener("click", () => {
+    connectImmoScout();
+  });
+
+  $("btnResetAuth").addEventListener("click", () => {
+    resetImmoScoutConnection();
   });
 
   $("btnFetchUrl").addEventListener("click", async () => {
@@ -1491,6 +1645,11 @@ function parseImportText(text) {
         importNoticeBase = payload?.hint || "";
         lastFetchBlockedReason = payload?.blockedReason || "";
         lastFetchMode = payload?.fetchMode || "";
+        if (payload?.authState) {
+          authConnection.state = payload.authState;
+          authConnection.hint = payload?.hint || authConnection.hint;
+          renderAuthStatus();
+        }
         const statusInfo = payload?.status ? ` (HTTP ${payload.status})` : "";
         const message =
           payload?.status === 401 || payload?.status === 403
@@ -1508,6 +1667,11 @@ function parseImportText(text) {
       importNoticeBase = payload.fetchMode === "playwright" ? payload.hint || "" : "";
       lastFetchBlockedReason = "";
       lastFetchMode = payload.fetchMode || "http";
+      if (payload?.authState) {
+        authConnection.state = payload.authState;
+        authConnection.hint = payload?.hint || authConnection.hint;
+        renderAuthStatus();
+      }
       parsedOffers = parseImportText(payload.html || "");
       renderImportResults();
       const modeLabel = payload.fetchMode === "playwright" ? " ueber Playwright" : "";
@@ -1583,6 +1747,8 @@ function parseImportText(text) {
   // Initial render
   loadSettingsToUi();
   updateServerHint();
+  renderAuthStatus();
+  refreshAuthStatus();
   renderOffers();
   setTab("offers");
 }

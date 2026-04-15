@@ -359,6 +359,21 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.75; 
   gap: 10px;
   margin-bottom: 12px;
 }
+.auth-card { margin-bottom: 12px; }
+.pill.status-connected {
+  background: var(--green-tint);
+  border-color: var(--green-border);
+}
+.pill.status-login-required,
+.pill.status-reconnect-needed {
+  background: var(--yellow-tint);
+  border-color: var(--yellow-border);
+}
+.pill.status-unavailable,
+.pill.status-error {
+  background: var(--red-tint);
+  border-color: var(--red-border);
+}
 .notice {
   margin-bottom: 12px;
   padding: 10px 12px;

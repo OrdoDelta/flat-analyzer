@@ -83,8 +83,26 @@
         <div class="panel">
           <h2>Import</h2>
           <p class="muted">
-            Primarer Weg: ImmoScout24-URL einfugen, HTML lokal abrufen und direkt analysieren. HTML oder Datei bleiben als Fallback verfugbar.
+            Primarer Weg: ImmoScout24-URL einfugen, ueber die gespeicherte ImmoScout-Sitzung abrufen und direkt analysieren. HTML oder Datei bleiben als Fallback verfugbar.
           </p>
+          <div class="settings-card auth-card">
+            <div class="row space-between">
+              <div>
+                <h3>ImmoScout-Verbindung</h3>
+                <p id="authHint" class="muted small">Status wird geprüft.</p>
+              </div>
+              <span id="authStatePill" class="pill">Unbekannt</span>
+            </div>
+            <div class="row">
+              <button id="btnConnectAuth" class="btn" type="button">Mit ImmoScout verbinden</button>
+              <button id="btnRefreshAuth" class="btn secondary" type="button">Status prüfen</button>
+              <button id="btnResetAuth" class="btn secondary" type="button">Verbindung zurücksetzen</button>
+              <span id="authActionStatus" class="muted small"></span>
+            </div>
+            <p class="muted small">
+              Lokaler Testablauf: Browserfenster auf diesem Mac oeffnen, einmal bei ImmoScout einloggen, danach sollte die Sitzung auch nach Server-Neustart erhalten bleiben.
+            </p>
+          </div>
           <div class="import-stack">
             <label class="field">
               <span class="label">ImmoScout24-URL</span>
@@ -139,11 +157,11 @@
                 <input id="targetYield" type="number" min="0" step="0.001" />
               </label>
               <label class="field">
-                <span class="label">ImmoScout-Cookie (optional, für Login-geschützte Seiten)</span>
+                <span class="label">Fallback: ImmoScout-Cookie (optional, nur Debug)</span>
                 <textarea id="importCookie" rows="3" placeholder="z. B. Cookie-Header aus dem Browser"></textarea>
               </label>
-              <p class="muted small">Falls URL-Import mit 401/403 scheitert: DevTools öffnen, im Tab Network die Seite neu laden, den Haupt-Request öffnen und den Wert von "Cookie" aus Request Headers hier einfügen.</p>
-              <p class="muted small">Der Cookie wird lokal in diesem Browser gespeichert und muss meist nur neu gesetzt werden, wenn deine ImmoScout-Sitzung abläuft.</p>
+              <p class="muted small">Nur als Fallback gedacht, wenn die Playwright-Verbindung nicht verfügbar ist. Normalerweise sollte die gespeicherte ImmoScout-Sitzung ohne manuelles Cookie-Kopieren ausreichen.</p>
+              <p class="muted small">Falls du den Fallback wirklich brauchst: DevTools öffnen, im Tab Network die Seite neu laden, den Haupt-Request öffnen und den Wert von "Cookie" aus Request Headers hier einfügen.</p>
               <p class="muted small">Wird auf den Kaufpreis angewendet, um die Gesamtkosten grob abzuschätzen.</p>
             </div>
 
